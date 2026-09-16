@@ -1,0 +1,17 @@
+ * Serving Flask app 'app'
+ * Debug mode: off
+WARNING: This is a development server. Do not use it in a production deployment. Use a production WSGI server instead.
+ * Running on http://127.0.0.1:5072
+Press CTRL+C to quit
+127.0.0.1 - - [16/Sep/2026 17:08:12] "GET /health HTTP/1.1" 200 -
+127.0.0.1 - - [16/Sep/2026 17:08:12] "GET /?build=2.7 HTTP/1.1" 302 -
+127.0.0.1 - - [16/Sep/2026 17:08:12] "GET /login HTTP/1.1" 200 -
+127.0.0.1 - - [16/Sep/2026 17:08:12] "GET /static/style.css HTTP/1.1" 200 -
+127.0.0.1 - - [16/Sep/2026 17:08:12] "GET /static/assets/da_bswm_logo.png HTTP/1.1" 200 -
+127.0.0.1 - - [16/Sep/2026 17:08:12] "GET /static/assets/almed_logo.png HTTP/1.1" 200 -
+127.0.0.1 - - [16/Sep/2026 17:08:12] "GET /favicon.ico HTTP/1.1" 404 -
+127.0.0.1 - - [16/Sep/2026 20:04:21] "POST /login HTTP/1.1" 302 -
+127.0.0.1 - - [16/Sep/2026 20:04:21] "GET / HTTP/1.1" 200 -
+127.0.0.1 - - [16/Sep/2026 20:04:21] "GET /static/style.css HTTP/1.1" 200 -
+127.0.0.1 - - [16/Sep/2026 20:04:21] "GET /static/assets/da_bswm_logo.png HTTP/1.1" 200 -
+127.0.0.1 - - [16/Sep/2026 20:04:21] "GET /static/assets/almed_logo.png HTTP/1.1" 200 -
