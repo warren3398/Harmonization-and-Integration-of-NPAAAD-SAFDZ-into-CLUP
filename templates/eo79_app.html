@@ -328,9 +328,9 @@ header.site-header.text-agency-header{background:linear-gradient(105deg,#075a3e 
 <button id="loadParcel">Load + Auto-fix Geometry</button><div class="status" id="parcelStatus">Waiting for parcel map.</div>
 </div></div>
 
-<div class="section compact" id="sec2"><div class="section-top"><h2>2. Built-in SAFDZ Database</h2><button class="detail-toggle" type="button" data-target="sec2">▼ Details</button></div>
-<div class="quick-upload"><label>SAFDZ coverage</label><select id="builtInProvince"><option value="AUTO">Auto-detect from mining parcel (nationwide)</option></select></div>
-<div class="section-details"><small>v36 nationwide: provinces are selected automatically using the parcel bounding box. Provincial SAFDZ GeoPackages are retrieved from Cloudflare R2 through the unified Render portal. Verify coverage before final analysis.</small>
+<div class="section compact" id="sec2"><div class="section-top"><h2>2. SAFDZ Database</h2></div>
+<div class="quick-upload"><div id="safdzDetectionSummary" role="status" aria-live="polite" style="padding:10px 12px;border:1px solid #d9e1e7;border-radius:8px;font-size:14px">⏳ Waiting for mining parcel</div><select id="builtInProvince" style="display:none"><option value="AUTO">Auto-detect from mining parcel (nationwide)</option></select></div>
+<div class="section-details" style="display:none"><small>v36 nationwide: provinces are selected automatically using the parcel bounding box. Provincial SAFDZ GeoPackages are retrieved from Cloudflare R2 through the unified Render portal. Verify coverage before final analysis.</small>
 <div class="row"><div><label>Classification field</label><select id="classField"><option value="SAFDZ">SAFDZ</option></select></div><div><label>Label field (optional)</label><select id="labelField"><option value="">None</option></select></div></div>
 <button id="loadSafdz">Load Built-in SAFDZ / Re-analyze</button><div class="status" id="safdzStatus">Nationwide index ready to load. Upload a mining parcel to analyze.</div>
 </div></div>
@@ -697,6 +697,16 @@ async function loadProvinceData(prov){
  })();provinceCache.set(key,work);
  try{return await work}catch(e){provinceCache.delete(key);throw e}
 }
+function setSafdzDetection(state,province,message){
+ const el=document.getElementById('safdzDetectionSummary');if(!el)return;
+ const icons={waiting:'⏳',loading:'⏳',success:'✅',error:'⚠️'};
+ const title={waiting:'Waiting for mining parcel',loading:'Detecting SAFDZ…',success:'SAFDZ detected',error:'SAFDZ detection failed'};
+ el.replaceChildren();
+ const line=document.createElement('div');line.style.fontWeight='600';line.textContent=(icons[state]||'⏳')+' '+(title[state]||title.waiting);el.appendChild(line);
+ if(province){const detail=document.createElement('div');detail.textContent='Province: '+province;detail.style.marginTop='4px';el.appendChild(detail)}
+ if(message&&state==='error'){const detail=document.createElement('small');detail.textContent=message;detail.style.display='block';detail.style.marginTop='4px';el.appendChild(detail)}
+ el.style.borderColor=state==='success'?'#86c5a2':state==='error'?'#e5adad':'#d9e1e7';
+}
 async function populateNationwideOptions(){
  try{
   const index=await getNationwideIndex();
@@ -713,6 +723,7 @@ async function populateNationwideOptions(){
 }
 async function loadBuiltInSafdz(){
  if(!parcelFC)throw new Error('Upload mining application parcel first.');
+ setSafdzDetection('loading');
  const pb=turf.bbox(parcelFC),index=await getNationwideIndex();
  const requested=document.getElementById('builtInProvince').value;
  const provinces=index.provinces.filter(p=>(requested==='AUTO'?intersectsBBox(pb,p.bbox):p.province===requested)&&r2Inventory.some(x=>x.province===p.province.toLowerCase().replace(/[^a-z0-9]+/g,'-').replace(/^-|-$/g,'')));
@@ -735,6 +746,7 @@ async function loadBuiltInSafdz(){
  const note=`Loaded ${provinces.map(p=>p.province).join(', ')}. ${all.length.toLocaleString()} candidate polygons; ${n.toLocaleString()} intersect parcel.`;
  // No province-boundary coverage exists for failed provinces, so this cannot prove completeness.
  status('safdzStatus',note+' R2 spatial query completed. Verify provincial coverage and classifications before official use.');
+ setSafdzDetection('success',provinces.map(p=>p.province).join(', '));
 }
 populateNationwideOptions();
 document.getElementById('loadParcel').onclick=async()=>{
@@ -744,10 +756,10 @@ document.getElementById('loadParcel').onclick=async()=>{
   const ha=turf.area(dissolveParcel(parcelFC))/10000;
   status('parcelStatus',`Loaded ${parcelFC.features.length} parcel feature(s). Parcel area: ${ha.toFixed(4)} ha. CRS normalized to WGS 84.`);
   safdzFC=null;clippedFC=null;redraw();fit();recompute();
-  try{await loadBuiltInSafdz()}catch(e){status('safdzStatus',e.message,true)}
+  try{await loadBuiltInSafdz()}catch(e){status('safdzStatus',e.message,true);setSafdzDetection('error',null,e.message)}
  }catch(e){status('parcelStatus','Error: '+e.message,true)}
 };
-document.getElementById('loadSafdz').onclick=async()=>{try{await loadBuiltInSafdz()}catch(e){status('safdzStatus','Error: '+e.message,true)}};
+document.getElementById('loadSafdz').onclick=async()=>{try{await loadBuiltInSafdz()}catch(e){status('safdzStatus','Error: '+e.message,true);setSafdzDetection('error',null,e.message)}};
 document.getElementById('classField').onchange=e=>{chosenClassField=e.target.value; if(safdzFC&&parcelFC)clipSafdz()};
 document.getElementById('applyText').onclick=()=>{document.getElementById('mapTitle').textContent=document.getElementById('titleInput').value;const p=document.getElementById('permitInput').value||'MINING APPLICATION / PERMIT';const l=document.getElementById('locationInput').value||'LOCATION';document.getElementById('mapSubtitle').innerHTML=esc(p)+'<br>'+esc(l)};
 document.getElementById('orientationSelect').onchange=setOrientation;document.getElementById('fitBtn').onclick=fit;document.getElementById('recomputeBtn').onclick=recompute;document.getElementById('jpgBtn').onclick=saveJpg;document.getElementById('pdfBtn').onclick=savePdf;document.getElementById('baseSelect').onchange=setBase;document.getElementById('hillToggle').onchange=setBase;document.getElementById('loadBackground').onclick=()=>loadBackgroundLayers().catch(e=>status('backgroundStatus','Error: '+e.message,true));document.getElementById('clearBackground').onclick=clearBackgroundRasters;document.getElementById('backgroundOpacity').oninput=updateBackgroundOpacity;document.getElementById('backgroundVectorColor').oninput=updateBackgroundVectorStyle;document.getElementById('backgroundVectorFill').oninput=updateBackgroundVectorStyle;document.getElementById('backgroundVectorLineOpacity').oninput=updateBackgroundVectorStyle;document.getElementById('backgroundVectorWidth').oninput=updateBackgroundVectorStyle;document.getElementById('backgroundVectorDashed').onchange=updateBackgroundVectorStyle;map.on('moveend',updateCoords);
