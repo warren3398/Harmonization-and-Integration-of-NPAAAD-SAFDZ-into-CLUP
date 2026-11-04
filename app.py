@@ -677,6 +677,20 @@ def eo79_module():
     #printLayout.portrait #scaleUnits {font-size:6.5px!important;margin-top:0!important}
     </style>"""
     page = page.replace('</head>', portrait_css + '</head>', 1)
+    # Label only polygons with enough on-screen room for legible SAFDZ class text.
+    # Re-evaluate on zoom to avoid label collisions on small map polygons.
+    page = page.replace(
+        "l.bindTooltip(c,{permanent:true,direction:'center',className:'safdz-label'})",
+        "if((()=>{const b=l.getBounds();const a=map.project(b.getNorthWest());"
+        "const z=map.project(b.getSouthEast());const w=Math.abs(z.x-a.x),"
+        "h=Math.abs(z.y-a.y);return w>=38&&h>=26&&w*h>=1600})())"
+        "l.bindTooltip(c,{permanent:true,direction:'center',className:'safdz-label'})",
+        1)
+    page = page.replace(
+        "function clipSafdz(){",
+        "map.on('zoomend',()=>{if(clippedFC)redraw()});"
+        "function clipSafdz(){",
+        1)
     # Expose only the live map's already-clipped SAFDZ data and its native rasterizer.
     page = page.replace(
         "let parcelFC=null,safdzFC=null,clippedFC=null,parcelLayer=null,safdzLayer=null;",
