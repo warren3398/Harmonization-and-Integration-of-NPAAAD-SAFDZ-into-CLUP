@@ -797,6 +797,12 @@ def run_background(job_id, job, uploads, fields, elu_mapping):
             raise ValueError('Required classification fields were lost during overlay: ' + ', '.join(missing))
         for f in required:
             u[f]=u[f].where(u[f].notna(), '').astype(str).str.strip()
+        # Detect classification loss after overlay, even when source polygons overlap.
+        for layer,col in [('NPAAAD',internal['npaaad']),('SAFDZ',internal['safdz'])]:
+            classified=u[col].astype(str).str.strip()
+            classified=classified[~classified.str.lower().isin(['','nan','none','<na>'])]
+            if classified.empty or float(u.loc[classified.index,'AREA_HA'].sum())<=0:
+                raise ValueError(f'{layer} classes were lost during polygon overlay or have zero area. Verify the classification field and inspect source geometry/CRS. Export stopped.')
         saf_matrix=pd.pivot_table(u,values='AREA_HA',index=internal['elu'],columns=internal['safdz'],aggfunc='sum',fill_value=0)
         np_matrix=pd.pivot_table(u,values='AREA_HA',index=internal['elu'],columns=internal['npaaad'],aggfunc='sum',fill_value=0)
         saf_cols=[c for c in SAFDZ_ORDER if c in saf_matrix.columns]+[c for c in saf_matrix.columns if c not in SAFDZ_ORDER]
