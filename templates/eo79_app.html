@@ -110,6 +110,19 @@ background-size:450px 250px,450px 250px,100% 100%;background-attachment:fixed}
 .access-card{width:min(430px,100%);background:rgba(255,255,255,.98);border-radius:18px;padding:30px;box-shadow:0 24px 70px rgba(0,0,0,.45);border-top:5px solid #0b7a53}
 .access-title{font-size:22px;font-weight:900;color:#0b5a3e;text-align:center;margin:0 0 5px}.access-sub{text-align:center;color:#56635d;font-size:13px;margin-bottom:22px}.access-card label{font-size:12px;color:#26362e;margin:10px 0 5px}.access-card input{width:100%;padding:11px 12px;border:1px solid #c7d0cb;border-radius:8px;font-size:14px}.access-card button{width:100%;padding:11px;border-radius:8px;background:#0b6b45;color:#fff;font-weight:800;margin-top:16px}.access-error{min-height:18px;color:#a51e25;text-align:center;font-size:12px;margin-top:10px}.access-note{text-align:center;font-size:10px;color:#7a837f;margin-top:15px}.logout-btn{position:fixed;right:14px;bottom:14px;z-index:99990;width:auto!important;padding:8px 13px!important;margin:0!important;border-radius:20px!important;background:#8b1d24!important;box-shadow:0 4px 14px rgba(0,0,0,.25)}
 
+
+/* Portrait correction: preserve the entire A4 page and prevent clipped legend. */
+#printLayout.portrait{grid-template-rows:660px minmax(0,1fr)!important;overflow:visible!important;}
+#printLayout.portrait #mapFrame{height:660px!important;min-width:0;}
+#printLayout.portrait .rightcol{overflow:visible!important;grid-template-rows:210px minmax(0,1fr)!important;min-width:0;}
+#printLayout.portrait .rightcol>.box:nth-child(3){overflow:visible!important;min-height:0;}
+#printLayout.portrait .legendTable{width:100%;table-layout:fixed!important;}
+#printLayout.portrait .legendTable td,#printLayout.portrait .legendTable th{overflow-wrap:anywhere;}
+/* Keep the full print sheet reachable in narrow desktop/portrait viewports. */
+.stage{min-width:0;overflow-x:auto!important;}
+#layoutWrap{width:max-content;max-width:none;min-width:0!important;margin:0 auto;justify-content:flex-start;}
+@media(max-width:1100px){#layoutWrap{margin-left:0;margin-right:0;}}
+@media(max-width:760px){.stage{width:100%;overflow-x:auto!important;overscroll-behavior-x:contain;}}
 </style>
 <style>
 /* SAFDZ official-template visual alignment v5 */
