@@ -630,6 +630,20 @@ def eo79_module():
     #printLayout.portrait #scaleUnits {font-size:6.5px!important;margin-top:0!important}
     </style>"""
     page = page.replace('</head>', portrait_css + '</head>', 1)
+    # Optional EO79 export checklist; preserves the original map UI.
+    page = page.replace('</body>', """<section id="eo79-export-panel" style="position:fixed;right:15px;bottom:15px;z-index:9999;background:white;color:#183a2b;padding:15px;border:1px solid #adc9b9;border-radius:12px;box-shadow:0 5px 24px #0003;max-width:340px;font:13px Arial">
+    <strong>Generate &amp; Download</strong><div style="margin:10px 0">
+    <label><input type="checkbox" class="eo79-format" value="jpeg" checked> JPEG map</label><br>
+    <label><input type="checkbox" class="eo79-format" value="pdf" checked> PDF map</label><br>
+    <label><input type="checkbox" class="eo79-format" value="shapefile" checked> Clipped SAFDZ Shapefile</label></div>
+    <div id="eo79-parcel-settings">
+    <select id="eo79-island"><option value="">Island group</option></select>
+    <select id="eo79-province"><option value="">Province</option></select>
+    <label>Parcel boundary<input type="file" id="eo79-parcel" accept=".zip,.gpkg,.geojson,.json"></label></div>
+    <button id="eo79-generate" type="button">Generate selected outputs</button>
+    <p id="eo79-export-status" style="max-width:300px;overflow-wrap:anywhere"></p></section>
+    <style>#eo79-export-panel select,#eo79-export-panel input[type=file]{display:block;width:100%;margin:7px 0;padding:5px}#eo79-generate{background:#17643f;color:white;border:0;border-radius:6px;padding:10px;cursor:pointer}@media print{#eo79-export-panel{display:none!important}}</style>
+    <script src="/static/eo79_export.js"></script>""" + '</body>', 1)
     return Response(page, mimetype='text/html')
 
 
