@@ -493,6 +493,110 @@ def eo79_safdz(island,province):
         app.logger.exception('EO79 R2 SAFDZ load failed')
         return jsonify({'error':str(e)}),502
 
+
+@app.route('/api/eo79/clip-shapefile', methods=['POST'])
+def eo79_clip_shapefile():
+    """Clip provincial SAFDZ to uploaded parcel geometry and return a zipped shapefile."""
+    import re
+    island = request.form.get('island', '').lower().strip()
+    province = request.form.get('province', '').lower().strip()
+    if island not in ('luzon', 'visayas', 'mindanao') or not re.fullmatch(r'[a-z0-9-]{2,60}', province):
+        return jsonify({'error': 'Choose a valid SAFDZ province.'}), 400
+    upload = request.files.get('parcel')
+    if not upload or not upload.filename:
+        return jsonify({'error': 'Upload a parcel shapefile ZIP or GeoPackage.'}), 400
+    suffix = Path(upload.filename).suffix.lower()
+    if suffix not in ('.zip', '.gpkg', '.geojson', '.json'):
+        return jsonify({'error': 'Parcel format must be ZIP shapefile, GPKG, or GeoJSON.'}), 400
+    with tempfile.TemporaryDirectory(prefix='eo79_clip_') as tmp:
+        folder = Path(tmp)
+        try:
+            if suffix == '.zip':
+                zipped = folder / 'parcel.zip'
+                upload.save(zipped)
+                with zipfile.ZipFile(zipped) as z:
+                    for item in z.infolist():
+                        if item.is_dir(): continue
+                        target = (folder / 'parcel_files' / item.filename).resolve()
+                        root = (folder / 'parcel_files').resolve()
+                        if not target.is_relative_to(root):
+                            raise ValueError('Invalid parcel ZIP paths')
+                        if item.file_size > 250 * 1024 * 1024:
+                            raise ValueError('Parcel file is too large')
+                        target.parent.mkdir(parents=True, exist_ok=True)
+                        with z.open(item) as src, open(target, 'wb') as dst:
+                            shutil.copyfileobj(src, dst)
+                files = list((folder / 'parcel_files').rglob('*.shp'))
+                if not files: raise ValueError('No .shp in parcel ZIP')
+                parcel = gpd.read_file(files[0])
+            else:
+                path = folder / ('parcel' + suffix)
+                upload.save(path)
+                parcel = gpd.read_file(path)
+            if parcel.empty or parcel.crs is None:
+                raise ValueError('Parcel must contain geometry and a defined CRS.')
+            parcel = parcel[parcel.geometry.notna() & ~parcel.geometry.is_empty].copy()
+            if parcel.empty: raise ValueError('Parcel has no valid geometries.')
+            parcel['geometry'] = parcel.geometry.map(make_valid)
+            parcel = parcel[parcel.geom_type.isin(['Polygon', 'MultiPolygon'])]
+            if parcel.empty: raise ValueError('Parcel must contain polygon boundaries.')
+            boundary = unary_union(parcel.geometry)
+            key = f'nationwide/{island}/{province}/safdz.gpkg'
+            cache = WORK_ROOT / 'eo79_r2' / island / (province + '.gpkg')
+            if not cache.exists(): r2_download(key, cache)
+            import pyogrio
+            info = pyogrio.read_info(cache)
+            source_crs = info.get('crs')
+            if not source_crs: raise ValueError('SAFDZ dataset has no CRS')
+            boundary_src = gpd.GeoSeries([boundary], crs=parcel.crs).to_crs(source_crs).iloc[0]
+            data = gpd.read_file(cache, bbox=tuple(boundary_src.bounds))
+            if data.empty: raise ValueError('No SAFDZ features intersect the parcel.')
+            data = data[data.geometry.notna() & ~data.geometry.is_empty].copy()
+            data['geometry'] = data.geometry.map(make_valid)
+            data = data[data.intersects(boundary_src)].copy()
+            data['geometry'] = data.geometry.intersection(boundary_src)
+            data = data.explode(index_parts=False, ignore_index=True)
+            data = data[data.geom_type.isin(['Polygon', 'MultiPolygon']) & ~data.geometry.is_empty].copy()
+            if data.empty: raise ValueError('No polygon SAFDZ overlap found within the parcel.')
+            data['AREA_HA'] = (data.to_crs('EPSG:6933').geometry.area / 10000).round(3)
+            data = data.loc[:, ~data.columns.duplicated()].copy()
+            # Shapefile DBF column names are limited to 10 characters.
+            names = {}
+            used = set()
+            for col in data.columns:
+                if col == 'geometry': continue
+                base = re.sub(r'[^A-Za-z0-9_]', '_', str(col))[:10] or 'FIELD'
+                name = base
+                counter = 1
+                while name.lower() in used:
+                    tail = str(counter)
+                    name = base[:10-len(tail)] + tail
+                    counter += 1
+                used.add(name.lower())
+                names[col] = name
+            data = data.rename(columns=names)
+            for col in data.columns:
+                if col != 'geometry' and str(data[col].dtype) in ('datetime64[ns]', 'datetime64[ns, UTC]'):
+                    data[col] = data[col].astype(str)
+            outdir = folder / 'output'
+            outdir.mkdir()
+            shp = outdir / 'EO79_SAFDZ_Clipped.shp'
+            data.to_file(shp, driver='ESRI Shapefile', encoding='UTF-8', index=False)
+            buffer = io.BytesIO()
+            with zipfile.ZipFile(buffer, 'w', zipfile.ZIP_DEFLATED) as z:
+                for item in outdir.iterdir():
+                    z.write(item, arcname=item.name)
+            buffer.seek(0)
+            return send_file(buffer, as_attachment=True,
+                             download_name=f'EO79_SAFDZ_Clipped_{province}.zip',
+                             mimetype='application/zip')
+        except (ValueError, zipfile.BadZipFile) as e:
+            return jsonify({'error': str(e)}), 400
+        except Exception as e:
+            app.logger.exception('EO79 shapefile clip failed')
+            return jsonify({'error': 'Clipping failed: ' + str(e)}), 500
+
+
 @app.route('/eo79')
 def eo79_module():
     """Public EO79 map without a login gate."""
