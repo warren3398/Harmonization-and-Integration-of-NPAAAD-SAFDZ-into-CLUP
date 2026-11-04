@@ -283,6 +283,18 @@ header.site-header.text-agency-header{background:linear-gradient(105deg,#075a3e 
 #printLayout:not(.portrait) .legendTable .ha,#printLayout:not(.portrait) .legendTable .pct{width:50px;}
 #printLayout:not(.portrait) .footer-note{font-size:7.5px;padding:3px 6px;}
 </style>
+<style id="v37-portrait-complete-page-fix">
+#printLayout.portrait{width:990px!important;height:1400px!important;padding:12px!important;gap:9px!important;grid-template-columns:minmax(0,1fr)!important;grid-template-rows:620px minmax(0,1fr)!important;overflow:visible!important}
+#printLayout.portrait #mapFrame{height:100%!important;min-height:0!important;min-width:0!important}
+#printLayout.portrait .rightcol{height:100%!important;min-height:0!important;display:grid!important;grid-template-columns:minmax(0,1fr) minmax(0,1fr)!important;grid-template-rows:202px minmax(0,1fr)!important;gap:8px!important;overflow:visible!important}
+#printLayout.portrait .rightcol>.box:nth-child(3){grid-column:1/-1!important;grid-row:2!important;min-height:0!important;overflow:visible!important}
+#printLayout.portrait .legendTable{font-size:9px!important;line-height:1.12!important;table-layout:fixed!important}
+#printLayout.portrait .legendTable th,#printLayout.portrait .legendTable td{padding:4px 5px!important;overflow-wrap:anywhere}
+#printLayout.portrait .boxtitle{padding:5px 9px!important}
+#printLayout.portrait .footer-note{padding:3px 6px!important}
+#layoutWrap{width:max-content;max-width:none}
+@media print{@page{size:A4;margin:0}#layoutWrap{min-width:0!important;filter:none!important}#printLayout{break-inside:avoid;page-break-inside:avoid}}
+</style>
 </head>
 <body>
 <div id="accessGate" aria-modal="true" role="dialog">
@@ -549,7 +561,20 @@ function renderLegend(vals={},parcelHa=0){const body=document.getElementById('le
 add(`<tr><td colspan="2" class="total">TOTAL PARCEL</td><td class="ha"><b>${parcelHa?parcelHa.toFixed(4):'–'}</b></td><td class="pct"><b>${parcelHa?'100.00':'–'}</b></td></tr>`)}
 function updateCoords(){const b=map.getBounds(),lngs=[b.getWest()+b.getEast()-b.getWest(),0,0];const xs=[b.getWest()+(b.getEast()-b.getWest())*.25,b.getWest()+(b.getEast()-b.getWest())*.58,b.getWest()+(b.getEast()-b.getWest())*.9];const fmt=v=>`${Math.abs(v).toFixed(4)}°${v>=0?'E':'W'}`;['c1','c2','c3','cb1','cb2','cb3'].forEach((id,i)=>document.getElementById(id).textContent=fmt(xs[i%3]))}
 function fit(){if(parcelFC){map.fitBounds(L.geoJSON(parcelFC).getBounds().pad(.18));setTimeout(()=>{map.invalidateSize();updateCoords()},150)}}
-async function rasterize(){status('exportStatus','Preparing high-resolution export…');await new Promise(r=>setTimeout(r,500));const el=document.getElementById('printLayout');return html2canvas(el,{scale:2,useCORS:true,allowTaint:false,backgroundColor:'#ffffff',logging:false})}
+async function rasterize(){
+  status('exportStatus','Preparing high-resolution export…');
+  map.invalidateSize({pan:false});
+  if(parcelFC)fit();
+  await new Promise(r=>setTimeout(r,850));
+  const el=document.getElementById('printLayout');
+  if(el.classList.contains('portrait')){
+    const legend=el.querySelector('.rightcol>.box:nth-child(3)');
+    const available=legend?.clientHeight||0;
+    const needed=legend?.scrollHeight||0;
+    if(needed>available+3)throw new Error('Portrait legend exceeds the A4 page. Reduce the legend text or adjust layout before exporting.');
+  }
+  return html2canvas(el,{scale:2,width:el.offsetWidth,height:el.offsetHeight,scrollX:0,scrollY:-window.scrollY,useCORS:true,allowTaint:false,backgroundColor:'#ffffff',logging:false});
+}
 async function saveJpg(){try{const c=await rasterize();const a=document.createElement('a');a.href=c.toDataURL('image/jpeg',.95);a.download='EO79_SAFDZ_Map.jpg';a.click();status('exportStatus','JPEG generated successfully.')}catch(e){status('exportStatus','JPEG export failed: '+e.message,true)}}
 async function savePdf(){try{const c=await rasterize();const {jsPDF}=window.jspdf;const o=document.getElementById('orientationSelect').value;const portrait=o==='portrait';const pdf=new jsPDF({orientation:o,unit:'mm',format:'a4'});pdf.addImage(c.toDataURL('image/jpeg',.94),'JPEG',0,0,portrait?210:297,portrait?297:210);pdf.save('EO79_SAFDZ_Map.pdf');status('exportStatus','PDF generated successfully.')}catch(e){status('exportStatus','PDF export failed: '+e.message,true)}}
 
