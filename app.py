@@ -453,13 +453,11 @@ def portal_home():
     return render_template('portal_home.html')
 
 @app.route('/harmonizer')
-@login_required
 def index():
     return render_template('index.html')
 
 
 @app.route('/api/eo79/safdz/<island>/<province>')
-@login_required
 def eo79_safdz(island,province):
     """Server-side GeoPackage access for EO79 parcel intersection, without manifests."""
     import re
@@ -496,9 +494,8 @@ def eo79_safdz(island,province):
         return jsonify({'error':str(e)}),502
 
 @app.route('/eo79')
-@login_required
 def eo79_module():
-    """Password-protected EO79 map, using the portal's server-side login."""
+    """Public EO79 map without a login gate."""
     from flask import Response
     from pathlib import Path
     page = (Path(app.template_folder) / 'eo79_app.html').read_text(encoding='utf-8')
@@ -564,7 +561,6 @@ def r2_download(key,dest):
     return dest
 
 @app.route('/api/r2/datasets')
-@login_required
 def list_r2_datasets():
     try:
         rows=[]
@@ -579,7 +575,6 @@ def list_r2_datasets():
         return jsonify({'error':'Unable to list R2 datasets: '+str(e)}),502
 
 @app.route('/inspect', methods=['POST'])
-@login_required
 def inspect_layers():
     job = WORK_ROOT / ('inspect_' + next(tempfile._get_candidate_names()))
     job.mkdir(parents=True, exist_ok=True)
@@ -877,7 +872,6 @@ def run_background(job_id, job, uploads, fields, elu_mapping):
         set_job(job_id,status='error',percent=JOBS.get(job_id,{}).get('percent',0),step='Processing Failed',elapsed=int(time.time()-started),error=str(e),details=traceback.format_exc())
 
 @app.route('/process_start', methods=['POST'])
-@login_required
 def process_start():
     try:
         chosen=r2_selection()
@@ -903,14 +897,12 @@ def process_start():
     except Exception as e: return jsonify({'error':str(e)}),400
 
 @app.route('/progress/<job_id>')
-@login_required
 def job_progress(job_id):
     with JOBS_LOCK: data=dict(JOBS.get(job_id,{}))
     if not data: return jsonify({'error':'Job not found'}),404
     data.pop('bundle',None); return jsonify(data)
 
 @app.route('/download/<job_id>')
-@login_required
 def job_download(job_id):
     with JOBS_LOCK: data=dict(JOBS.get(job_id,{}))
     if data.get('status')!='complete' or not data.get('bundle'): return jsonify({'error':'Results are not ready.'}),409
