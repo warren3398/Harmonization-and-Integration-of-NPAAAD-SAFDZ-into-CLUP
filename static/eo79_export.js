@@ -1,20 +1,6 @@
 document.addEventListener('DOMContentLoaded',()=>{
 const $=id=>document.getElementById(id), status=$('eo79-export-status'), island=$('eo79-island'),province=$('eo79-province');
-// Place the export choices inside Step 5, immediately below the existing Export PDF button.
-const panel=$('eo79-export-panel');
-if(panel){
-  panel.style.cssText='position:static;right:auto;bottom:auto;z-index:auto;width:100%;max-width:100%;box-sizing:border-box;margin:12px 0 0;padding:12px;border:1px solid #c8ded0;border-radius:10px;background:#f4faf6;color:#183a2b;box-shadow:none;font:13px Arial';
-  const controls=[...document.querySelectorAll('button,input[type="button"],a')];
-  const pdf=controls.find(el=>/^Export PDF$/i.test((el.textContent||el.value||'').trim()));
-  if(pdf){
-    // PDF and JPEG buttons share a row in the Step 5 Generate Result panel.
-    const row=pdf.parentElement;
-    row.insertAdjacentElement('afterend',panel);
-  }else{
-    const heading=[...document.querySelectorAll('h1,h2,h3,h4,h5,legend,strong,span,div')].find(el=>el.children.length===0&&/5\\.\\s*Generate Result/i.test((el.textContent||'').trim()));
-    if(heading){const section=heading.closest('section,details,.card,.panel')||heading.parentElement;section.appendChild(panel);}
-  }
-}
+// The checklist is inserted directly into Step 5 by the server.
 // All outputs use the parcel and clipped SAFDZ already loaded in the EO79 map.
 const settings=$('eo79-parcel-settings');if(settings)settings.remove();
 document.querySelectorAll('.eo79-format').forEach(input=>input.addEventListener('change',()=>{}));
