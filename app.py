@@ -683,6 +683,11 @@ def eo79_module():
         "let parcelFC=null,safdzFC=null,clippedFC=null,parcelLayer=null,safdzLayer=null;"
         "window.__eo79ExportState=()=>({clippedFC,parcelFC,rasterize});",
         1)
+    # Keep only Fit Parcel in the original Step 5 action row; export via checklist.
+    page = page.replace(
+        '<button class="secondary" id="recomputeBtn">Recompute Areas</button>', '', 1)
+    page = page.replace('<button id="jpgBtn">Export JPEG</button>', '', 1)
+    page = page.replace('<button id="pdfBtn">Export PDF</button>', '', 1)
     # Optional EO79 export checklist; preserves the original map UI.
     page = page.replace('</body>', """<section id="eo79-export-panel" style="position:fixed;right:15px;bottom:15px;z-index:9999;background:white;color:#183a2b;padding:15px;border:1px solid #adc9b9;border-radius:12px;box-shadow:0 5px 24px #0003;max-width:340px;font:13px Arial">
     <strong>Generate &amp; Download</strong><div style="margin:10px 0">
