@@ -42,7 +42,7 @@ let inspectData={};
 let r2Rows=[];const islandSel=document.getElementById('r2_island'),provinceSel=document.getElementById('r2_province');
 fetch('/api/r2/datasets').then(r=>r.json()).then(data=>{if(data.error)throw Error(data.error);r2Rows=data.datasets||[];for(const island of [...new Set(r2Rows.map(x=>x.island))].sort()){let o=document.createElement('option');o.value=island;o.textContent=island.toUpperCase();islandSel.appendChild(o)}document.getElementById('r2_status').textContent=r2Rows.length+' R2 GeoPackages found'}).catch(e=>document.getElementById('r2_status').textContent='R2 unavailable: '+e.message);
 islandSel.addEventListener('change',()=>{provinceSel.innerHTML='<option value="">Choose province</option>';for(const province of [...new Set(r2Rows.filter(x=>x.island===islandSel.value).map(x=>x.province))].sort()){const layers=r2Rows.filter(x=>x.island===islandSel.value&&x.province===province).map(x=>x.layer);if(!layers.includes('npaaad')||!layers.includes('safdz'))continue;const o=document.createElement('option');o.value=province;o.textContent=province.replaceAll('-',' ').toUpperCase();provinceSel.appendChild(o)}syncR2()});
-provinceSel.addEventListener('change',syncR2);document.getElementById('manualR2').open=true;
+provinceSel.addEventListener('change',syncR2);document.getElementById('manualR2').open=false;
 function syncR2(){const chosen=!!(islandSel.value&&provinceSel.value);document.getElementById('manualR2').open=!chosen;for(const name of ['npaaad_zip','safdz_zip']){const el=form.querySelector('[name="'+name+'"]');el.required=!chosen;el.disabled=chosen}inspectNow()}
 
 function renderEluMap(field){
@@ -63,8 +63,8 @@ function renderEluMap(field){
 }
 function esc(s){return String(s??'').replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));}
 async function inspectNow(){
- if(![...form.querySelectorAll('input[type=file]')].some(x=>x.files?.length))return;
- run.disabled=true;msg.textContent='Reading shapefile fields and CRS…';
+ if(![...form.querySelectorAll('input[type=file]')].some(x=>x.files?.length)){run.disabled=true;mapping.classList.add('hidden');msg.textContent='Select a province and upload ELU ZIP to inspect GIS fields.';return;}
+ run.disabled=true;msg.textContent='Inspecting GIS fields and NPAAAD/SAFDZ CRS…';
  try{const fd=new FormData(form),r=await fetch('/inspect',{method:'POST',body:fd}),data=await r.json();if(!r.ok)throw new Error(data.error||'Unable to inspect files.');
  inspectData=data;cards.innerHTML='';const crs=data._crs_summary||{},banner=document.getElementById('crsBanner');
  if(crs.master_ok){banner.className='crs-banner ok';banner.innerHTML='✓ <b>Final CRS:</b> '+esc(crs.master_crs)+' <span class="muted">(from NPAAAD / SAFDZ)</span>';}else{banner.className='crs-banner warn';banner.innerHTML='⚠ <b>Final CRS:</b> '+esc(crs.error||'Upload both NPAAAD and SAFDZ to detect the master CRS.');}
