@@ -15,10 +15,9 @@ if(panel){
     if(heading){const section=heading.closest('section,details,.card,.panel')||heading.parentElement;section.appendChild(panel);}
   }
 }
-let rows=[];
-fetch('/api/r2/datasets').then(r=>r.json()).then(d=>{rows=(d.datasets||[]).filter(x=>x.layer==='safdz');[...new Set(rows.map(x=>x.island))].forEach(v=>island.add(new Option(v,v)));}).catch(()=>{status.textContent='Province inventory unavailable';});
-island.addEventListener('change',()=>{province.replaceChildren(new Option('Province',''));rows.filter(x=>x.island===island.value).forEach(x=>province.add(new Option(x.province.replaceAll('-',' '),x.province)));});
-document.querySelectorAll('.eo79-format').forEach(c=>c.addEventListener('change',()=>{$('eo79-parcel-settings').hidden=!document.querySelector('.eo79-format[value="shapefile"]').checked;}));
+// All outputs use the parcel and clipped SAFDZ already loaded in the EO79 map.
+const settings=$('eo79-parcel-settings');if(settings)settings.remove();
+document.querySelectorAll('.eo79-format').forEach(input=>input.addEventListener('change',()=>{}));
 function save(blob,name){const url=URL.createObjectURL(blob),a=document.createElement('a');a.href=url;a.download=name;a.click();setTimeout(()=>URL.revokeObjectURL(url),12000);}
 function library(url,test){return new Promise((ok,fail)=>{if(test())return ok();const s=document.createElement('script');s.src=url;s.onload=()=>test()?ok():fail(Error('Library unavailable'));s.onerror=()=>fail(Error('Could not load export library'));document.head.append(s);});}
 $('eo79-generate').onclick=async()=>{
@@ -27,9 +26,8 @@ if(!formats.length){status.textContent='Choose at least one format';return;}
 const btn=$('eo79-generate');btn.disabled=true;status.textContent='Generating...';
 try{
 if(formats.includes('jpeg')||formats.includes('pdf')){
-const map=$('printLayout');if(!map)throw Error('Generate the map layout first');
-await library('https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js',()=>!!window.html2canvas);
-const canvas=await html2canvas(map,{scale:2,backgroundColor:'#ffffff',useCORS:true});
+const state=window.__eo79ExportState?.();if(!state||!state.parcelFC)throw Error('Upload the parcel and generate the map first');
+const canvas=await state.rasterize();
 const jpg=await new Promise(ok=>canvas.toBlob(ok,'image/jpeg',.94));
 if(!jpg)throw Error('JPEG failed');
 if(formats.includes('jpeg'))files.push(['EO79_Map.jpg',jpg]);
@@ -41,12 +39,14 @@ pdf.addImage(canvas.toDataURL('image/jpeg',.94),'JPEG',(w-iw)/2,(h-ih)/2,iw,ih);
 files.push(['EO79_Map.pdf',pdf.output('blob')]);
 }}
 if(formats.includes('shapefile')){
-if(!island.value||!province.value||!$('eo79-parcel').files[0])throw Error('Choose island, province and parcel boundary');
-const data=new FormData();data.append('island',island.value);data.append('province',province.value);data.append('parcel',$('eo79-parcel').files[0]);
-const response=await fetch('/api/eo79/clip-shapefile',{method:'POST',body:data});
-if(!response.ok){const msg=await response.json().catch(()=>({}));throw Error(msg.error||'Shapefile clipping failed');}
-files.push(['EO79_SAFDZ_Clipped.zip',await response.blob()]);
+const state=window.__eo79ExportState?.();
+if(!state?.parcelFC)throw Error('Upload the parcel map first');
+if(!state?.clippedFC?.features?.length)throw Error('Load and clip SAFDZ to the parcel first');
+const response=await fetch('/api/eo79/export-current-shapefile',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(state.clippedFC)});
+if(!response.ok){const msg=await response.json().catch(()=>({}));throw Error(msg.error||'Shapefile export failed');}
+files.push(['EO79_SAFDZ_Parcel_Clip.zip',await response.blob()]);
 }
+
 if(files.length===1)save(files[0][1],files[0][0]);
 else{
 await library('https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js',()=>!!window.JSZip);
