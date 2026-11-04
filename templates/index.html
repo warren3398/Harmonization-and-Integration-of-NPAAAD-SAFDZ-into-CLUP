@@ -15,11 +15,10 @@
 </div><div class="header-actions"><div class="status"><i></i> WEB WORKSPACE</div><a class="logout-btn" href="/logout">Logout</a></div></section>
 <form id="mainForm" action="/process_start" method="post" enctype="multipart/form-data" class="card">
 <h2>1. Upload GIS Layers</h2><p class="hint">Upload each shapefile as a ZIP containing .shp, .shx, .dbf and .prj.</p>
-<div class="card" style="padding:12px;margin-bottom:14px"><h3>Cloudflare R2 · Provincial NPAAAD / SAFDZ</h3><p class="hint">Choose an island group and province to use existing GeoPackages directly. Leave blank for manual ZIP uploads.</p><select name="r2_island" id="r2_island"><option value="">Manual upload</option></select><select name="r2_province" id="r2_province"><option value="">Choose province</option></select><p id="r2_status" class="hint">Checking R2 connection…</p></div><div class="grid">
+<div class="grid">
 <label>Existing / Actual Land Use (ELU) *<input type="file" name="elu_zip" accept=".zip" required></label>
 <label>Approved / Proposed CLUP (optional)<input type="file" name="clup_zip" accept=".zip"></label>
-<label>NPAAAD *<input type="file" name="npaaad_zip" accept=".zip" required></label>
-<label>SAFDZ *<input type="file" name="safdz_zip" accept=".zip" required></label>
+<div style="grid-column:1/-1;border:1px solid #d5e0d8;border-radius:12px;padding:14px"><h3 style="margin:0 0 8px">NPAAAD / SAFDZ — Automatic Dataset Selection</h3><p class="hint">Select the island group and province. NPAAAD and SAFDZ GeoPackages will be retrieved automatically from Cloudflare R2.</p><div style="display:grid;grid-template-columns:1fr 1fr;gap:12px"><label>Island Group<select name="r2_island" id="r2_island"><option value="">Manual ZIP upload</option></select></label><label>Province<select name="r2_province" id="r2_province"><option value="">Choose province</option></select></label></div><p id="r2_status" class="hint">Checking R2 datasets…</p><details id="manualR2"><summary>Manual NPAAAD / SAFDZ ZIP upload (optional)</summary><div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:10px"><label>NPAAAD ZIP<input type="file" name="npaaad_zip" accept=".zip"></label><label>SAFDZ ZIP<input type="file" name="safdz_zip" accept=".zip"></label></div></details></div>
 <label>Land Cover Map 2025 (optional)<input type="file" name="landcover_zip" accept=".zip"></label>
 <label>Poultry Shapefile (optional)<input type="file" name="poultry_zip" accept=".zip"></label></div>
 <div id="inspectMsg" class="note">Select shapefile ZIPs. Fields and CRS are detected automatically.</div>
@@ -43,8 +42,8 @@ let inspectData={};
 let r2Rows=[];const islandSel=document.getElementById('r2_island'),provinceSel=document.getElementById('r2_province');
 fetch('/api/r2/datasets').then(r=>r.json()).then(data=>{if(data.error)throw Error(data.error);r2Rows=data.datasets||[];for(const island of [...new Set(r2Rows.map(x=>x.island))].sort()){let o=document.createElement('option');o.value=island;o.textContent=island.toUpperCase();islandSel.appendChild(o)}document.getElementById('r2_status').textContent=r2Rows.length+' R2 GeoPackages found'}).catch(e=>document.getElementById('r2_status').textContent='R2 unavailable: '+e.message);
 islandSel.addEventListener('change',()=>{provinceSel.innerHTML='<option value="">Choose province</option>';for(const province of [...new Set(r2Rows.filter(x=>x.island===islandSel.value).map(x=>x.province))].sort()){const layers=r2Rows.filter(x=>x.island===islandSel.value&&x.province===province).map(x=>x.layer);if(!layers.includes('npaaad')||!layers.includes('safdz'))continue;const o=document.createElement('option');o.value=province;o.textContent=province.replaceAll('-',' ').toUpperCase();provinceSel.appendChild(o)}syncR2()});
-provinceSel.addEventListener('change',syncR2);
-function syncR2(){const chosen=!!(islandSel.value&&provinceSel.value);for(const name of ['npaaad_zip','safdz_zip']){const el=form.querySelector('[name="'+name+'"]');el.required=!chosen;el.disabled=chosen}inspectNow()}
+provinceSel.addEventListener('change',syncR2);document.getElementById('manualR2').open=true;
+function syncR2(){const chosen=!!(islandSel.value&&provinceSel.value);document.getElementById('manualR2').open=!chosen;for(const name of ['npaaad_zip','safdz_zip']){const el=form.querySelector('[name="'+name+'"]');el.required=!chosen;el.disabled=chosen}inspectNow()}
 
 function renderEluMap(field){
  const box=document.getElementById('eluMapBox'),rows=document.getElementById('eluMapRows'),hidden=document.getElementById('eluMapping');
