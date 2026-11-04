@@ -500,6 +500,14 @@ def eo79_module():
         end = page.find('</script>', start)
         if end != -1:
             page = page[:start] + page[end + len('</script>'):]
+    # The agency panel is in a fixed 210px portrait grid row, previously clipped by overflow:hidden.
+    # Expand that row and allow its contents to remain visible.
+    page = page.replace('</head>', """<style id="eo79-portrait-agency-unclip">
+    #printLayout.portrait .rightcol {grid-template-rows:260px minmax(0,1fr)!important;overflow:visible!important}
+    #printLayout.portrait .agency {overflow:visible!important;height:auto!important;min-height:0!important}
+    #printLayout.portrait .agency .official-scale {overflow:visible!important}
+    #printLayout.portrait .agency .scale-bar-wrap {margin-bottom:6px!important}
+    </style>""" + '</head>', 1)
     # Reserve space for the complete portrait scale bar and kilometer labels.
     portrait_css = """<style id="eo79-portrait-scale-clearance">
     #printLayout.portrait .agency .banner {margin-top:3px!important;margin-bottom:2px!important;padding-top:4px!important;padding-bottom:4px!important;line-height:1!important}
