@@ -32,7 +32,7 @@ def login_required(fn):
         if not session.get('logged_in'):
             if request.path.startswith(('/progress','/process','/inspect')):
                 return jsonify({'error':'Login required.'}), 401
-            return redirect(url_for('login'))
+            return redirect(url_for('login', next=request.path))
         return fn(*args, **kwargs)
     return wrapped
 
@@ -426,15 +426,20 @@ def write_excel(summary_df, union_df, qa, out_path, poultry_by_elu=None):
 
 @app.route('/login', methods=['GET', 'POST'])
 def login():
+    # Return users to the requested module after authentication.
+    # Allow only known local destinations to prevent open redirects.
+    destination = request.args.get('next', '')
+    if destination not in ('/eo79', '/harmonizer'):
+        destination = url_for('index')
     if session.get('logged_in'):
-        return redirect(url_for('index'))
+        return redirect(destination)
     error = None
     if request.method == 'POST':
         username = request.form.get('username', '').strip()
         password = request.form.get('password', '')
         if username == LOGIN_USERNAME and check_password_hash(LOGIN_PASSWORD_HASH, password):
             session.clear(); session['logged_in'] = True; session['username'] = username
-            return redirect(url_for('index'))
+            return redirect(destination)
         error = 'Invalid username or password.'
     return render_template('login.html', error=error)
 
