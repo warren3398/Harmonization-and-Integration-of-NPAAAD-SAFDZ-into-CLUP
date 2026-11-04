@@ -452,6 +452,44 @@ def portal_home():
 def index():
     return render_template('index.html')
 
+
+@app.route('/api/eo79/safdz/<island>/<province>')
+@login_required
+def eo79_safdz(island,province):
+    """Server-side GeoPackage access for EO79 parcel intersection, without manifests."""
+    import re
+    from shapely.geometry import shape, mapping
+    if island not in ('luzon','visayas','mindanao') or not re.fullmatch(r'[a-z0-9-]{2,60}',province):
+        return jsonify({'error':'Invalid province'}),400
+    try:
+        key=f'nationwide/{island}/{province}/safdz.gpkg'
+        cache=WORK_ROOT/'eo79_r2'/island/(province+'.gpkg')
+        if not cache.exists(): r2_download(key,cache)
+        bbox_text=request.args.get('bbox','')
+        if not bbox_text:
+            return jsonify({'error':'bbox required: west,south,east,north'}),400
+        coords=[float(v) for v in bbox_text.split(',')]
+        if len(coords)!=4 or not (-180<=coords[0]<coords[2]<=180 and -90<=coords[1]<coords[3]<=90):
+            return jsonify({'error':'Invalid bbox'}),400
+        import pyogrio
+        from shapely.geometry import box
+        bounds=box(*coords)
+        # pyogrio bbox is expressed in the source CRS; use geopandas read_file
+        # with WGS84 bbox transformed to the dataset CRS.
+        info=pyogrio.read_info(cache)
+        src_crs=info.get('crs')
+        if not src_crs: raise ValueError('SAFDZ dataset has no CRS')
+        query_bounds=gpd.GeoSeries([bounds],crs='EPSG:4326').to_crs(src_crs).total_bounds
+        data=gpd.read_file(cache,bbox=tuple(query_bounds)).to_crs('EPSG:4326')
+        data=data[data.intersects(bounds)].copy()
+        if len(data)>10000: return jsonify({'error':'Too many features; reduce bbox size'}),413
+        data['geometry']=data.geometry.intersection(bounds)
+        data=data[~data.geometry.is_empty]
+        return app.response_class(data.to_json(),mimetype='application/geo+json')
+    except Exception as e:
+        app.logger.exception('EO79 R2 SAFDZ load failed')
+        return jsonify({'error':str(e)}),502
+
 @app.route('/eo79')
 def eo79_module():
     return render_template('eo79_module.html')
