@@ -428,7 +428,7 @@ def write_excel(summary_df, union_df, qa, out_path, poultry_by_elu=None):
 def login():
     # Return users to the requested module after authentication.
     # Allow only known local destinations to prevent open redirects.
-    destination = request.args.get('next', '')
+    destination = request.values.get('next', '')
     if destination not in ('/eo79', '/harmonizer'):
         destination = url_for('index')
     if session.get('logged_in'):
@@ -441,7 +441,7 @@ def login():
             session.clear(); session['logged_in'] = True; session['username'] = username
             return redirect(destination)
         error = 'Invalid username or password.'
-    return render_template('login.html', error=error)
+    return render_template('login.html', error=error, destination=destination)
 
 @app.route('/logout')
 def logout():
