@@ -689,7 +689,7 @@ def eo79_module():
     page = page.replace('<button id="jpgBtn">Export JPEG</button>', '<button id="jpgBtn" hidden aria-hidden="true" tabindex="-1"></button>', 1)
     page = page.replace('<button id="pdfBtn">Export PDF</button>', '<button id="pdfBtn" hidden aria-hidden="true" tabindex="-1"></button>', 1)
     # Optional EO79 export checklist; preserves the original map UI.
-    page = page.replace('</body>', """<section id="eo79-export-panel" style="position:fixed;right:15px;bottom:15px;z-index:9999;background:white;color:#183a2b;padding:15px;border:1px solid #adc9b9;border-radius:12px;box-shadow:0 5px 24px #0003;max-width:340px;font:13px Arial">
+    page = page.replace('<div class="status warn" id="exportStatus">', """<section id="eo79-export-panel" style="position:static;width:100%;box-sizing:border-box;margin:12px 0;padding:12px;border:1px solid #c8ded0;border-radius:10px;background:#f4faf6;color:#183a2b;font:13px Arial">
     <strong>Generate &amp; Download</strong><div style="margin:10px 0">
     <label><input type="checkbox" class="eo79-format" value="jpeg" checked> JPEG map</label><br>
     <label><input type="checkbox" class="eo79-format" value="pdf" checked> PDF map</label><br>
@@ -697,7 +697,8 @@ def eo79_module():
     <button id="eo79-generate" type="button">Generate selected outputs</button>
     <p id="eo79-export-status" style="max-width:300px;overflow-wrap:anywhere"></p></section>
     <style>#eo79-export-panel select,#eo79-export-panel input[type=file]{display:block;width:100%;margin:7px 0;padding:5px}#eo79-generate{background:#17643f;color:white;border:0;border-radius:6px;padding:10px;cursor:pointer}@media print{#eo79-export-panel{display:none!important}}</style>
-    <script src="/static/eo79_export.js?v=0e7180f-fixed"></script>""" + '</body>', 1)
+    """ + '<div class="status warn" id="exportStatus">', 1)
+    page = page.replace('</body>', '<script src="/static/eo79_export.js?v=step5-restore-2"></script></body>', 1)
     return Response(page, mimetype='text/html')
 
 
