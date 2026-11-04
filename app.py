@@ -491,8 +491,10 @@ def eo79_safdz(island,province):
         return jsonify({'error':str(e)}),502
 
 @app.route('/eo79')
+@login_required
 def eo79_module():
-    return render_template('eo79_module.html')
+    from flask import send_from_directory
+    return send_from_directory(app.template_folder,'eo79_app.html')
 
 
 @app.route('/health')
