@@ -62,16 +62,20 @@ function renderEluMap(field){
  const count=box.querySelector('.elu-count'); if(count)count.textContent=vals.length+' unique value'+(vals.length===1?'':'s');
 }
 function esc(s){return String(s??'').replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));}
-async function inspectNow(){
+let inspectSeq=0, inspectTimer=null;
+function inspectNow(){clearTimeout(inspectTimer);const seq=++inspectSeq;inspectTimer=setTimeout(()=>performInspect(seq),500)}
+async function performInspect(seq){
  if(![...form.querySelectorAll('input[type=file]')].some(x=>x.files?.length)){run.disabled=true;mapping.classList.add('hidden');msg.textContent='Select a province and upload ELU ZIP to inspect GIS fields.';return;}
+ if(!islandSel.value && !form.querySelector('[name="npaaad_zip"]').files.length){run.disabled=true;msg.textContent='Select an island group and province, or upload NPAAAD and SAFDZ ZIPs.';return;}
+ if(islandSel.value&&!provinceSel.value){run.disabled=true;msg.textContent='Choose a province before inspecting layers.';return;}
  run.disabled=true;msg.textContent='Inspecting GIS fields and NPAAAD/SAFDZ CRS…';
- try{const fd=new FormData(form),r=await fetch('/inspect',{method:'POST',body:fd}),data=await r.json();if(!r.ok)throw new Error(data.error||'Unable to inspect files.');
+ try{const fd=new FormData(form),r=await fetch('/inspect',{method:'POST',body:fd});const body=await r.text();if(seq!==inspectSeq)return;let data;try{data=JSON.parse(body)}catch{throw new Error('Server returned an HTML or empty response during GIS inspection. Try again after the service restarts, or select a smaller dataset.')}if(!r.ok)throw new Error(data.error||'Unable to inspect files.');
  inspectData=data;cards.innerHTML='';const crs=data._crs_summary||{},banner=document.getElementById('crsBanner');
  if(crs.master_ok){banner.className='crs-banner ok';banner.innerHTML='✓ <b>Final CRS:</b> '+esc(crs.master_crs)+' <span class="muted">(from NPAAAD / SAFDZ)</span>';}else{banner.className='crs-banner warn';banner.innerHTML='⚠ <b>Final CRS:</b> '+esc(crs.error||'Upload both NPAAAD and SAFDZ to detect the master CRS.');}
  for(const role of ['elu','clup','npaaad','safdz','landcover']){const m=data[role];if(!m)continue;const div=document.createElement('div');div.className='layer-card minimalist';const opts=m.fields.map(f=>`<option value="${esc(f)}" ${f===m.suggested_field?'selected':''}>${esc(f)}</option>`).join('');
  div.innerHTML=`<h3>${labels[role]}</h3><div class="final-crs"><b>Final CRS</b><span>${esc(crs.master_ok?crs.master_crs:'Waiting for NPAAAD / SAFDZ')}</span></div><label>Classification Field<select name="${fieldNames[role]}">${opts}</select></label>${role==='elu'?`<div id="eluMapBox" class="elu-map hidden"><div class="elu-map-head"><div><h3>ELU Description Mapping</h3><p class="hint">Check each description using the dropdown: AGR, BU, or Other / Ignore.</p></div><b class="elu-count"></b></div><div id="eluMapRows" class="elu-map-rows"></div></div>`:''}`;cards.appendChild(div);if(role==='elu'){const sel=div.querySelector('select[name="elu_field"]');sel.addEventListener('change',()=>renderEluMap(sel.value));renderEluMap(sel.value);}}
  mapping.classList.remove('hidden');const required=!!form.querySelector('[name="elu_zip"]').files.length && ((!!islandSel.value&&!!provinceSel.value)||['npaaad_zip','safdz_zip'].every(n=>form.querySelector('[name="'+n+'"]').files.length));run.disabled=!(required&&crs.master_ok);msg.textContent=crs.master_ok?'✓ Ready. Other layers will be reprojected automatically to the Final CRS.':'Upload matching NPAAAD and SAFDZ layers to establish the Final CRS.';
- }catch(e){msg.textContent='Error: '+e.message;}
+ }catch(e){if(seq!==inspectSeq)return;run.disabled=true;mapping.classList.add('hidden');msg.textContent='Error: '+e.message;}
 }
 form.addEventListener('change',e=>{if(e.target.type==='file')inspectNow();});
 
