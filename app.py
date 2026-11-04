@@ -444,9 +444,17 @@ def logout():
     return redirect(url_for('login'))
 
 @app.route('/')
+def portal_home():
+    return render_template('portal_home.html')
+
+@app.route('/harmonizer')
 @login_required
 def index():
     return render_template('index.html')
+
+@app.route('/eo79')
+def eo79_module():
+    return render_template('eo79_module.html')
 
 
 @app.route('/health')
