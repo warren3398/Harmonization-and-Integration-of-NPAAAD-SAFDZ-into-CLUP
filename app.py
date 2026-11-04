@@ -814,6 +814,10 @@ def run_background(job_id, job, uploads, fields, elu_mapping):
         np_cols=[c for c in NPAAAD_ORDER if c in np_matrix.columns]+[c for c in np_matrix.columns if c not in NPAAAD_ORDER]
         saf_matrix=saf_matrix.reindex(columns=saf_cols); np_matrix=np_matrix.reindex(columns=np_cols)
         qa['Final']={'crs':str(union2.crs),'features':len(union2),'total_area_ha':round(float(union2['AREA_HA'].sum()),3),'geometry_types':', '.join(sorted(union2.geom_type.unique()))}
+        final_invalid=int((~union2.geometry.is_valid).sum())
+        qa['Final']['invalid_after_overlay']=final_invalid
+        qa['Final']['geometry_validation']='PASS' if final_invalid==0 else 'FAIL'
+        if final_invalid: raise ValueError(f'Final layer contains {final_invalid} invalid geometries. Export stopped.')
         progress(90, 'Generating Excel, Shapefile and QA/QC report')
         out_dir=job/'outputs'; out_dir.mkdir(); shp_dir=out_dir/'union_shapefile'; shp_dir.mkdir()
         shp_path=shp_dir/'HARMONIZED_UNION.shp'; union2.to_file(shp_path)
