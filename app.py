@@ -454,6 +454,7 @@ def index():
 
 
 @app.route('/api/eo79/safdz/<island>/<province>')
+@login_required
 def eo79_safdz(island,province):
     """Server-side GeoPackage access for EO79 parcel intersection, without manifests."""
     import re
@@ -490,8 +491,9 @@ def eo79_safdz(island,province):
         return jsonify({'error':str(e)}),502
 
 @app.route('/eo79')
+@login_required
 def eo79_module():
-    """Public EO79 map, without its legacy browser-side password gate."""
+    """Password-protected EO79 map, using the portal's server-side login."""
     from flask import Response
     from pathlib import Path
     page = (Path(app.template_folder) / 'eo79_app.html').read_text(encoding='utf-8')
