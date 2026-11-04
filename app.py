@@ -654,6 +654,11 @@ def run_background(job_id, job, uploads, fields, elu_mapping):
         elu_p=fast_prepare(elu_raw,fields['elu'],target_crs).rename(columns={fields['elu']:internal['elu']})
         np_p=fast_prepare(np_raw,fields['npaaad'],target_crs).rename(columns={fields['npaaad']:internal['npaaad']})
         saf_p=fast_prepare(saf_raw,fields['safdz'],target_crs).rename(columns={fields['safdz']:internal['safdz']})
+        for label, original, repaired in [('ELU',elu_raw,elu_p),('NPAAAD',np_raw,np_p),('SAFDZ',saf_raw,saf_p)]:
+            before=int((~original.geometry.is_valid).sum())
+            after=int((~repaired.geometry.is_valid).sum())
+            qa[label+'_post_repair']={'invalid_before':before,'invalid_after_repair':after,'features_before':len(original),'features_after_repair':len(repaired),'repair_status':'PASS' if after==0 else 'FAIL'}
+            if after: raise ValueError(f'{label}: {after} invalid geometries remain after repair.')
         progress(27, 'Preparing ELU boundary')
         elu=dissolve_by_field(elu_p,internal['elu'])
         try: boundary_geom=elu.geometry.union_all()
