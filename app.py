@@ -575,10 +575,12 @@ def inspect_layers():
         if chosen:
             for role,key in chosen.items():
                 file=r2_download(key,job/(role+'.gpkg'))
-                gdf=gpd.read_file(file)
+                import pyogrio
+                info=pyogrio.read_info(file)
+                gdf=gpd.read_file(file,rows=1000)
                 fields=[c for c in gdf.columns if c!='geometry']
                 suggested=suggest_field(fields,role)
-                result[role]={'filename':key,'crs':str(gdf.crs),'epsg':gdf.crs.to_epsg() if gdf.crs else None,'authority':str(gdf.crs.to_authority()) if gdf.crs else None,'geometry_types':list(gdf.geom_type.dropna().astype(str).unique()),'feature_count':len(gdf),'fields':fields,'suggested_field':suggested,'sample_values':field_preview(gdf,suggested)}
+                result[role]={'filename':key,'crs':str(gdf.crs),'epsg':gdf.crs.to_epsg() if gdf.crs else None,'authority':str(gdf.crs.to_authority()) if gdf.crs else None,'geometry_types':list(gdf.geom_type.dropna().astype(str).unique()),'feature_count':int(info.get('features') or len(gdf)),'fields':fields,'suggested_field':suggested,'sample_values':field_preview(gdf,suggested)}
         # NPAAAD + SAFDZ are the authoritative/master CRS. Other layers will
         # be reprojected to this CRS during processing.
         np_meta, saf_meta = result.get('npaaad'), result.get('safdz')
@@ -586,8 +588,8 @@ def inspect_layers():
         master_ok = False
         master_error = None
         if np_meta and saf_meta:
-            np_crs = gpd.read_file(job/'npaaad.gpkg' if chosen else list((job/'npaaad').rglob('*.shp'))[0]).crs
-            saf_crs = gpd.read_file(job/'safdz.gpkg' if chosen else list((job/'safdz').rglob('*.shp'))[0]).crs
+            np_crs = gpd.read_file(job/'npaaad.gpkg',rows=1).crs if chosen else gpd.read_file(list((job/'npaaad').rglob('*.shp'))[0],rows=1).crs
+            saf_crs = gpd.read_file(job/'safdz.gpkg',rows=1).crs if chosen else gpd.read_file(list((job/'safdz').rglob('*.shp'))[0],rows=1).crs
             if np_crs is None or saf_crs is None:
                 master_error = 'NPAAAD or SAFDZ has a missing/unreadable CRS.'
             elif np_crs.equals(saf_crs):
