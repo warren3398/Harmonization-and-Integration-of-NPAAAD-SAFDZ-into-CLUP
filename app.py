@@ -664,6 +664,20 @@ def run_background(job_id, job, uploads, fields, elu_mapping):
         progress(36, 'Filtering NPAAAD and SAFDZ to ELU')
         np_local=normalize_polygon_gdf(gpd.clip(np_p,elu_boundary,keep_geom_type=True))
         saf_local=normalize_polygon_gdf(gpd.clip(saf_p,elu_boundary,keep_geom_type=True))
+        # Fail closed: an ELU-only result is not a valid NPAAAD/SAFDZ harmonization.
+        # Zero overlap can mean a wrong province, missing CRS alignment, or
+        # incomplete R2 datasets; never silently export zeros as final results.
+        def _overlap_report(layer, data):
+            if data.empty:
+                return f'{layer}: 0 intersecting polygons'
+            codes=data[internal['npaaad'] if layer=='NPAAAD' else internal['safdz']].dropna().astype(str).str.strip()
+            return f'{layer}: {len(data)} polygons, codes '+', '.join(sorted(set(codes))[:12])
+        if np_local.empty or saf_local.empty:
+            raise ValueError('No spatial overlap with the ELU boundary. '+_overlap_report('NPAAAD',np_local)+'; '+_overlap_report('SAFDZ',saf_local)+'. Check province selection, layer CRS, and source dataset coverage. Excel export stopped to avoid misleading zero-area results.')
+        for layer,data,col in [('NPAAAD',np_local,internal['npaaad']),('SAFDZ',saf_local,internal['safdz'])]:
+            valid=data[col].dropna().astype(str).str.strip()
+            if valid.empty or not valid.ne('').any():
+                raise ValueError(f'{layer} overlaps ELU but the selected classification field has no values. Select the correct {layer} field in Layer Settings.')
         np_clip=dissolve_by_field(np_local,internal['npaaad'])
         saf_clip=dissolve_by_field(saf_local,internal['safdz'])
         progress(48, 'Clipping NPAAAD and SAFDZ to ELU')
