@@ -677,6 +677,13 @@ def eo79_module():
     #printLayout.portrait #scaleUnits {font-size:6.5px!important;margin-top:0!important}
     </style>"""
     page = page.replace('</head>', portrait_css + '</head>', 1)
+    # Keep the legend's hectare values at two decimal places so they fit their cells.
+    legend_start = page.find('function renderLegend(')
+    legend_end = page.find('function updateCoords()', legend_start)
+    if legend_start >= 0 and legend_end > legend_start:
+        legend_script = page[legend_start:legend_end].replace('.toFixed(4)', '.toFixed(2)')
+        page = page[:legend_start] + legend_script + page[legend_end:]
+    page = page.replace('</head>', '<style id="eo79-legend-number-fit">#legendBody td.ha,#legendBody td.pct{white-space:nowrap;text-align:right;font-variant-numeric:tabular-nums;padding-left:2px!important;padding-right:3px!important;box-sizing:border-box}</style></head>', 1)
     # Label only polygons with enough on-screen room for legible SAFDZ class text.
     # Re-evaluate on zoom to avoid label collisions on small map polygons.
     page = page.replace(
