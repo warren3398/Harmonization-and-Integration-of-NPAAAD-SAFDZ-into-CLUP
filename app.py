@@ -494,6 +494,53 @@ def eo79_safdz(island,province):
         return jsonify({'error':str(e)}),502
 
 
+@app.route('/api/eo79/export-current-shapefile', methods=['POST'])
+def eo79_export_current_shapefile():
+    """Export the actual clipped SAFDZ GeoJSON already displayed in EO79."""
+    try:
+        payload = request.get_json(silent=True) or {}
+        features = payload.get('features', [])
+        if not isinstance(features, list) or not features or len(features) > 50000:
+            return jsonify({'error': 'No clipped SAFDZ polygons on the current map.'}), 400
+        gdf = gpd.GeoDataFrame.from_features(features, crs='EPSG:4326')
+        gdf = gdf[gdf.geometry.notna() & ~gdf.geometry.is_empty].copy()
+        gdf = gdf[gdf.geom_type.isin(('Polygon', 'MultiPolygon'))]
+        if gdf.empty:
+            return jsonify({'error': 'Current map contains no clipped SAFDZ polygons.'}), 400
+        gdf['AREA_HA'] = (gdf.to_crs('EPSG:6933').geometry.area / 10000).round(3)
+        import re
+        used = set()
+        names = {}
+        for col in gdf.columns:
+            if col == 'geometry': continue
+            base = re.sub('[^A-Za-z0-9_]', '_', str(col))[:10] or 'FIELD'
+            name = base
+            n = 1
+            while name.lower() in used:
+                suffix = str(n)
+                name = base[:10-len(suffix)] + suffix
+                n += 1
+            used.add(name.lower())
+            names[col] = name
+        gdf = gdf.rename(columns=names)
+        for col in gdf.columns:
+            if col != 'geometry' and str(gdf[col].dtype).startswith('datetime'):
+                gdf[col] = gdf[col].astype(str)
+        with tempfile.TemporaryDirectory(prefix='eo79_current_') as folder:
+            shp = Path(folder) / 'EO79_SAFDZ_Parcel_Clip.shp'
+            gdf.to_file(shp, driver='ESRI Shapefile', encoding='UTF-8', index=False)
+            output = io.BytesIO()
+            with zipfile.ZipFile(output, 'w', zipfile.ZIP_DEFLATED) as z:
+                for f in Path(folder).iterdir():
+                    z.write(f, f.name)
+            output.seek(0)
+            return send_file(output, mimetype='application/zip', as_attachment=True,
+                             download_name='EO79_SAFDZ_Parcel_Clip.zip')
+    except Exception:
+        app.logger.exception('Current EO79 shapefile export failed')
+        return jsonify({'error': 'Unable to export current clipped SAFDZ geometry.'}), 500
+
+
 @app.route('/api/eo79/clip-shapefile', methods=['POST'])
 def eo79_clip_shapefile():
     """Clip provincial SAFDZ to uploaded parcel geometry and return a zipped shapefile."""
@@ -630,6 +677,12 @@ def eo79_module():
     #printLayout.portrait #scaleUnits {font-size:6.5px!important;margin-top:0!important}
     </style>"""
     page = page.replace('</head>', portrait_css + '</head>', 1)
+    # Expose only the live map's already-clipped SAFDZ data and its native rasterizer.
+    page = page.replace(
+        "let parcelFC=null,safdzFC=null,clippedFC=null,parcelLayer=null,safdzLayer=null;",
+        "let parcelFC=null,safdzFC=null,clippedFC=null,parcelLayer=null,safdzLayer=null;"
+        "window.__eo79ExportState=()=>({clippedFC,parcelFC,rasterize});",
+        1)
     # Optional EO79 export checklist; preserves the original map UI.
     page = page.replace('</body>', """<section id="eo79-export-panel" style="position:fixed;right:15px;bottom:15px;z-index:9999;background:white;color:#183a2b;padding:15px;border:1px solid #adc9b9;border-radius:12px;box-shadow:0 5px 24px #0003;max-width:340px;font:13px Arial">
     <strong>Generate &amp; Download</strong><div style="margin:10px 0">
