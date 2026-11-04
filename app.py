@@ -500,6 +500,20 @@ def eo79_module():
         end = page.find('</script>', start)
         if end != -1:
             page = page[:start] + page[end + len('</script>'):]
+    # Reserve space for the complete portrait scale bar and kilometer labels.
+    portrait_css = """<style id="eo79-portrait-scale-clearance">
+    #printLayout.portrait .agency .banner {margin-top:3px!important;margin-bottom:2px!important;padding-top:4px!important;padding-bottom:4px!important;line-height:1!important}
+    #printLayout.portrait .agency .subtitle {min-height:0!important;line-height:1!important;font-size:7.5px!important}
+    #printLayout.portrait .agency .official-north {height:29px!important;width:40px!important;margin:0 auto!important}
+    #printLayout.portrait .agency .official-north img {height:28px!important;width:30px!important;object-fit:contain!important}
+    #printLayout.portrait .agency .official-scale {margin-top:0!important;line-height:1!important}
+    #printLayout.portrait #numericScale {margin-bottom:1px!important}
+    #printLayout.portrait .scale-bar-wrap {margin-bottom:0!important}
+    #printLayout.portrait .scale-bar {height:7px!important}
+    #printLayout.portrait .scale-bar span {margin-top:3px!important}
+    #printLayout.portrait #scaleUnits {font-size:6.5px!important;margin-top:0!important}
+    </style>"""
+    page = page.replace('</head>', portrait_css + '</head>', 1)
     return Response(page, mimetype='text/html')
 
 
