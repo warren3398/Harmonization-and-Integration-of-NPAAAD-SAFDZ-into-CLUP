@@ -11,11 +11,11 @@
 <div class="hero-copy">
   <div class="agency-title"><strong>Department of Agriculture</strong><strong>Bureau of Soils and Water Management</strong><strong>Agricultural Land Management and Evaluation Division</strong></div>
   <h1>Harmonization and Integration of <span>NPAAAD/SAFDZ</span> into CLUP <small>v2.7</small></h1>
-  <p>Local GIS harmonization workspace · NPAAAD/SAFDZ authoritative CRS</p>
-</div><div class="header-actions"><div class="status"><i></i> LOCAL WORKSPACE</div><a class="logout-btn" href="/logout">Logout</a></div></section>
+  <p>Web-based GIS harmonization workspace · NPAAAD/SAFDZ authoritative CRS</p>
+</div><div class="header-actions"><div class="status"><i></i> WEB WORKSPACE</div><a class="logout-btn" href="/logout">Logout</a></div></section>
 <form id="mainForm" action="/process_start" method="post" enctype="multipart/form-data" class="card">
 <h2>1. Upload GIS Layers</h2><p class="hint">Upload each shapefile as a ZIP containing .shp, .shx, .dbf and .prj.</p>
-<div class="grid">
+<div class="card" style="padding:12px;margin-bottom:14px"><h3>Cloudflare R2 · Provincial NPAAAD / SAFDZ</h3><p class="hint">Choose an island group and province to use existing GeoPackages directly. Leave blank for manual ZIP uploads.</p><select name="r2_island" id="r2_island"><option value="">Manual upload</option></select><select name="r2_province" id="r2_province"><option value="">Choose province</option></select><p id="r2_status" class="hint">Checking R2 connection…</p></div><div class="grid">
 <label>Existing / Actual Land Use (ELU) *<input type="file" name="elu_zip" accept=".zip" required></label>
 <label>Approved / Proposed CLUP (optional)<input type="file" name="clup_zip" accept=".zip"></label>
 <label>NPAAAD *<input type="file" name="npaaad_zip" accept=".zip" required></label>
@@ -40,6 +40,12 @@ const form=document.getElementById('mainForm'),msg=document.getElementById('insp
 const labels={elu:'Existing / Actual Land Use (ELU)',clup:'Approved / Proposed CLUP',npaaad:'NPAAAD',safdz:'SAFDZ',landcover:'Land Cover Map 2025',poultry:'Poultry Shapefile'};
 const fieldNames={elu:'elu_field',npaaad:'npaaad_field',safdz:'safdz_field',landcover:'landcover_field',clup:'clup_field'};
 let inspectData={};
+let r2Rows=[];const islandSel=document.getElementById('r2_island'),provinceSel=document.getElementById('r2_province');
+fetch('/api/r2/datasets').then(r=>r.json()).then(data=>{if(data.error)throw Error(data.error);r2Rows=data.datasets||[];for(const island of [...new Set(r2Rows.map(x=>x.island))].sort()){let o=document.createElement('option');o.value=island;o.textContent=island.toUpperCase();islandSel.appendChild(o)}document.getElementById('r2_status').textContent=r2Rows.length+' R2 GeoPackages found'}).catch(e=>document.getElementById('r2_status').textContent='R2 unavailable: '+e.message);
+islandSel.addEventListener('change',()=>{provinceSel.innerHTML='<option value="">Choose province</option>';for(const province of [...new Set(r2Rows.filter(x=>x.island===islandSel.value).map(x=>x.province))].sort()){const layers=r2Rows.filter(x=>x.island===islandSel.value&&x.province===province).map(x=>x.layer);if(!layers.includes('npaaad')||!layers.includes('safdz'))continue;const o=document.createElement('option');o.value=province;o.textContent=province.replaceAll('-',' ').toUpperCase();provinceSel.appendChild(o)}syncR2()});
+provinceSel.addEventListener('change',syncR2);
+function syncR2(){const chosen=!!(islandSel.value&&provinceSel.value);for(const name of ['npaaad_zip','safdz_zip']){const el=form.querySelector('[name="'+name+'"]');el.required=!chosen;el.disabled=chosen}inspectNow()}
+
 function renderEluMap(field){
  const box=document.getElementById('eluMapBox'),rows=document.getElementById('eluMapRows'),hidden=document.getElementById('eluMapping');
  if(!box||!rows||!hidden)return;
@@ -65,7 +71,7 @@ async function inspectNow(){
  if(crs.master_ok){banner.className='crs-banner ok';banner.innerHTML='✓ <b>Final CRS:</b> '+esc(crs.master_crs)+' <span class="muted">(from NPAAAD / SAFDZ)</span>';}else{banner.className='crs-banner warn';banner.innerHTML='⚠ <b>Final CRS:</b> '+esc(crs.error||'Upload both NPAAAD and SAFDZ to detect the master CRS.');}
  for(const role of ['elu','clup','npaaad','safdz','landcover']){const m=data[role];if(!m)continue;const div=document.createElement('div');div.className='layer-card minimalist';const opts=m.fields.map(f=>`<option value="${esc(f)}" ${f===m.suggested_field?'selected':''}>${esc(f)}</option>`).join('');
  div.innerHTML=`<h3>${labels[role]}</h3><div class="final-crs"><b>Final CRS</b><span>${esc(crs.master_ok?crs.master_crs:'Waiting for NPAAAD / SAFDZ')}</span></div><label>Classification Field<select name="${fieldNames[role]}">${opts}</select></label>${role==='elu'?`<div id="eluMapBox" class="elu-map hidden"><div class="elu-map-head"><div><h3>ELU Description Mapping</h3><p class="hint">Check each description using the dropdown: AGR, BU, or Other / Ignore.</p></div><b class="elu-count"></b></div><div id="eluMapRows" class="elu-map-rows"></div></div>`:''}`;cards.appendChild(div);if(role==='elu'){const sel=div.querySelector('select[name="elu_field"]');sel.addEventListener('change',()=>renderEluMap(sel.value));renderEluMap(sel.value);}}
- mapping.classList.remove('hidden');const required=['elu_zip','npaaad_zip','safdz_zip'].every(n=>form.querySelector(`[name="${n}"]`)?.files.length);run.disabled=!(required&&crs.master_ok);msg.textContent=crs.master_ok?'✓ Ready. Other layers will be reprojected automatically to the Final CRS.':'Upload matching NPAAAD and SAFDZ layers to establish the Final CRS.';
+ mapping.classList.remove('hidden');const required=!!form.querySelector('[name="elu_zip"]').files.length && ((!!islandSel.value&&!!provinceSel.value)||['npaaad_zip','safdz_zip'].every(n=>form.querySelector('[name="'+n+'"]').files.length));run.disabled=!(required&&crs.master_ok);msg.textContent=crs.master_ok?'✓ Ready. Other layers will be reprojected automatically to the Final CRS.':'Upload matching NPAAAD and SAFDZ layers to establish the Final CRS.';
  }catch(e){msg.textContent='Error: '+e.message;}
 }
 form.addEventListener('change',e=>{if(e.target.type==='file')inspectNow();});
