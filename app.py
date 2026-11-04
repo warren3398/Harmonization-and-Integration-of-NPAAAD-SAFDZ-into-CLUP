@@ -14,13 +14,17 @@ from openpyxl.styles import Font, PatternFill, Border, Side, Alignment
 from openpyxl.utils import get_column_letter
 from functools import wraps
 from werkzeug.security import check_password_hash
+import boto3
+from botocore.config import Config
 
 app = Flask(__name__)
-app.secret_key = os.environ.get('ALRMS_SESSION_SECRET', 'alrms-local-session-v2-7-change-me')
+app.secret_key = os.environ.get('ALRMS_SESSION_SECRET', os.urandom(32))
 app.config.update(SESSION_COOKIE_HTTPONLY=True, SESSION_COOKIE_SAMESITE='Lax')
 LOGIN_USERNAME = os.environ.get('ALRMS_USERNAME', 'ALRMS')
 DEFAULT_PASSWORD_HASH = 'pbkdf2:sha256:600000$alrms-v27-local$52d29729841c4eb54914bc5b24bea26e44050e1e7e77957f7e5238049d3ce4c5'
 LOGIN_PASSWORD_HASH = os.environ.get('ALRMS_PASSWORD_HASH', DEFAULT_PASSWORD_HASH)
+if os.environ.get('RENDER') and not os.environ.get('ALRMS_PASSWORD_HASH'):
+    raise RuntimeError('Set ALRMS_PASSWORD_HASH in Render')
 
 def login_required(fn):
     @wraps(fn)
@@ -450,6 +454,47 @@ def health():
     return jsonify({'status': 'ok', 'app': 'NPAAAD/SAFDZ CLUP Harmonizer', 'version': '2.7'})
 
 
+def r2_client():
+    account=os.environ.get('R2_ACCOUNT_ID')
+    access=os.environ.get('R2_ACCESS_KEY_ID')
+    secret=os.environ.get('R2_SECRET_ACCESS_KEY')
+    if not all((account,access,secret)):
+        raise ValueError('R2 credentials missing from this Render service')
+    return boto3.client('s3',endpoint_url='https://'+account+'.r2.cloudflarestorage.com',aws_access_key_id=access,aws_secret_access_key=secret,region_name='auto',config=Config(signature_version='s3v4'))
+
+def r2_selection():
+    import re
+    island=request.form.get('r2_island','').lower().strip()
+    province=request.form.get('r2_province','').lower().strip()
+    if not island and not province: return None
+    if island not in ('luzon','visayas','mindanao') or not re.fullmatch(r'[a-z0-9-]{2,60}',province):
+        raise ValueError('Invalid province selection')
+    return {layer:'nationwide/'+island+'/'+province+'/'+layer+'.gpkg' for layer in ('npaaad','safdz')}
+
+def r2_download(key,dest):
+    dest.parent.mkdir(parents=True,exist_ok=True)
+    client=r2_client()
+    bucket=os.environ.get('R2_BUCKET','npaaad-safdz-data')
+    obj=client.head_object(Bucket=bucket,Key=key)
+    if obj['ContentLength']>500*1024*1024: raise ValueError('Selected GeoPackage exceeds 500 MB')
+    client.download_file(bucket,key,str(dest))
+    return dest
+
+@app.route('/api/r2/datasets')
+@login_required
+def list_r2_datasets():
+    try:
+        rows=[]
+        client=r2_client()
+        for page in client.get_paginator('list_objects_v2').paginate(Bucket=os.environ.get('R2_BUCKET','npaaad-safdz-data'),Prefix='nationwide/'):
+            for item in page.get('Contents',[]):
+                parts=item['Key'].split('/')
+                if len(parts)==4 and parts[1] in ('luzon','visayas','mindanao') and parts[3] in ('npaaad.gpkg','safdz.gpkg') and item['Size']>0:
+                    rows.append({'island':parts[1],'province':parts[2],'layer':parts[3][:-5],'bytes':item['Size']})
+        return jsonify({'datasets':rows})
+    except Exception as e:
+        return jsonify({'error':'Unable to list R2 datasets: '+str(e)}),502
+
 @app.route('/inspect', methods=['POST'])
 @login_required
 def inspect_layers():
@@ -532,8 +577,8 @@ def run_background(job_id, job, uploads, fields, elu_mapping):
     try:
         progress(5, 'Reading uploaded shapefiles')
         shp_elu=extract_zip_path(uploads['elu_zip'], job/'elu')
-        shp_np=extract_zip_path(uploads['npaaad_zip'], job/'npaaad')
-        shp_saf=extract_zip_path(uploads['safdz_zip'], job/'safdz')
+        shp_np=extract_zip_path(uploads['npaaad_zip'], job/'npaaad') if 'npaaad_zip' in uploads else uploads['npaaad_gpkg']
+        shp_saf=extract_zip_path(uploads['safdz_zip'], job/'safdz') if 'safdz_zip' in uploads else uploads['safdz_gpkg']
         elu_raw=gpd.read_file(shp_elu); np_raw=gpd.read_file(shp_np); saf_raw=gpd.read_file(shp_saf)
         if np_raw.crs is None or saf_raw.crs is None: raise ValueError('NPAAAD or SAFDZ has a missing/unreadable CRS (.prj).')
         if not np_raw.crs.equals(saf_raw.crs): raise ValueError('NPAAAD and SAFDZ have different CRS. Processing stopped to protect spatial alignment.')
@@ -713,7 +758,8 @@ def run_background(job_id, job, uploads, fields, elu_mapping):
 @login_required
 def process_start():
     try:
-        for r in ['elu_zip','npaaad_zip','safdz_zip']:
+        chosen=r2_selection()
+        for r in (['elu_zip'] if chosen else ['elu_zip','npaaad_zip','safdz_zip']):
             if r not in request.files or not request.files[r].filename: raise ValueError(f'Missing required upload: {r}')
         job_id=uuid.uuid4().hex; job=WORK_ROOT/job_id; up=job/'uploads'; up.mkdir(parents=True)
         uploads={}
@@ -721,6 +767,8 @@ def process_start():
             f=request.files.get(name)
             if f and f.filename:
                 path=up/(name+'.zip'); f.save(path); uploads[name]=path
+        if chosen:
+            for role,key in chosen.items(): uploads[role+'_gpkg']=r2_download(key,up/(role+'.gpkg'))
         fields={'elu':request.form.get('elu_field','ELU').strip(),'clup':request.form.get('clup_field','CLUP').strip(),'npaaad':request.form.get('npaaad_field','NPAAAD').strip(),'safdz':request.form.get('safdz_field','SAFDZ').strip(),'landcover':request.form.get('landcover_field','CLASS').strip()}
         try:
             elu_mapping=json.loads(request.form.get('elu_mapping','{}') or '{}')
