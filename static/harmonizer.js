@@ -1,0 +1,145 @@
+'use strict';
+(() => {
+ const $=id=>document.getElementById(id),form=$('mainForm'),run=$('runBtn'),msg=$('inspectMsg'),mapping=$('mapping'),cards=$('layerCards');
+ const island=$('r2_island'),province=$('r2_province'),manual=$('manualR2');
+ const file=name=>form.elements.namedItem(name),hasFile=name=>!!file(name)?.files?.length;
+ const labels={elu:'Existing / Actual Land Use (ELU)',clup:'Approved / Proposed CLUP',npaaad:'NPAAAD',safdz:'SAFDZ',landcover:'Land Cover Map 2025'};
+ const steps=['Upload Data','Field Mapping','Validate & Clean','Reproject & Dissolve','Clip & Union','Compute & Export'];
+ let datasets=[],inspection=null,inspected=false,busy=false,sequence=0,debounce=null,controller=null,eluMap=Object.create(null);
+ const esc=value=>String(value??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+ function notice(text,state='info'){msg.textContent=text;msg.dataset.state=state;}
+ function setStep(index,complete=false){
+  $('workflowStatus').textContent=complete?'Complete · Results ready':`Step ${index+1} of 6 · ${steps[index]}`;
+  document.querySelectorAll('.steps li').forEach((el,i)=>{el.classList.toggle('active',!complete&&i===index);el.classList.toggle('done',complete||i<index);if(i===index&&!complete)el.setAttribute('aria-current','step');else el.removeAttribute('aria-current');});
+ }
+ function sourceReady(){return !!(island.value&&province.value)||(!island.value&&hasFile('npaaad_zip')&&hasFile('safdz_zip'));}
+ function fieldsReady(){return ['elu','npaaad','safdz',...['clup','landcover'].filter(role=>hasFile(role+'_zip'))].every(role=>!!file(role+'_field')?.value);}
+ function pendingCount(){return Object.values(eluMap).filter(value=>!value).length;}
+ function reviewReady(){return Object.keys(eluMap).length>0&&!pendingCount()&&!!$('eluReviewed')?.checked;}
+ function ready(){return inspected&&hasFile('elu_zip')&&sourceReady()&&inspection?._crs_summary?.master_ok&&fieldsReady()&&reviewReady();}
+ function refresh(){
+  run.disabled=busy||!ready();
+  $('runHint').textContent=busy?'Processing your selected files. Inputs are locked until this job finishes.':run.disabled?'Complete uploads, select classification fields, and review every ELU description.':'Ready to generate the Excel summary, GIS layer, and QA/QC report.';
+ }
+ function updateMapping(){
+  $('eluMapping').value=JSON.stringify(eluMap);
+  const total=Object.keys(eluMap).length,pending=pendingCount(),ignored=Object.values(eluMap).filter(v=>v==='OTHER').length;
+  $('mappingCount').textContent=`${total-pending} of ${total} reviewed · ${pending} pending · ${ignored} ignored`;
+  $('eluReviewed').disabled=!!pending||busy;
+  $('eluReviewed').checked=false;
+  if(pending)notice(`Review ELU descriptions: ${pending} still need a category. AGR = agricultural; BU = built-up; Other / Ignore excludes the description from ELU-based recommendations.`,'warning');
+  else notice('All ELU descriptions have categories. Confirm the mapping below to continue.','warning');
+  refresh();
+ }
+ function renderElu(field){
+  const rows=$('eluMapRows'),values=inspection?.elu?.field_values?.[field]||[];
+  eluMap=Object.create(null);rows.replaceChildren();
+  for(const value of values){
+   eluMap[value]='';const row=document.createElement('div');row.className='elu-map-row';
+   row.innerHTML=`<span>${esc(value)}</span><select aria-label="Category for ${esc(value)}"><option value="">Choose category…</option><option value="AGR">AGR — Agricultural</option><option value="BU">BU — Built-up</option><option value="OTHER">Other / Ignore</option></select>`;
+   row.querySelector('select').addEventListener('change',event=>{eluMap[value]=event.target.value;updateMapping();});rows.append(row);
+  }
+  $('eluReviewed').checked=false;updateMapping();
+  if(!values.length)notice('The selected ELU field has no descriptions. Choose a populated classification field.','error');
+ }
+ function invalidate(){
+  clearTimeout(debounce);controller?.abort();sequence++;inspected=false;inspection=null;eluMap=Object.create(null);
+  $('eluMapping').value='{}';mapping.classList.add('hidden');cards.replaceChildren();
+  $('progressPanel').classList.add('hidden');$('downloadBtn').classList.add('hidden');$('downloadBtn').removeAttribute('href');
+  setStep(0);refresh();
+ }
+ function inspectNow(){
+  if(busy)return;invalidate();
+  if(!hasFile('elu_zip')){notice('Upload the required ELU shapefile ZIP to continue.');return;}
+  if(!sourceReady()){notice(island.value?'Choose a province with both NPAAAD and SAFDZ datasets.':'Manual mode: upload both NPAAAD and SAFDZ shapefile ZIPs.','warning');return;}
+  notice('Checking uploaded files and coordinate systems…');
+  const current=sequence;debounce=setTimeout(()=>inspect(current),500);
+ }
+ async function readJSON(response,fallback){
+  let data;try{data=JSON.parse(await response.text());}catch{throw Error(fallback);}
+  if(!response.ok)throw Error(data.error||fallback);return data;
+ }
+ async function inspect(current){
+  controller=new AbortController();
+  try{
+   const data=await readJSON(await fetch('/inspect',{method:'POST',body:new FormData(form),signal:controller.signal}),'Unable to inspect the files. The service may have restarted; please retry.');
+   if(current!==sequence)return;
+   inspection=data;inspected=true;cards.replaceChildren();const crs=data._crs_summary||{};
+   $('crsBanner').className='crs-banner '+(crs.master_ok?'ok':'warn');
+   $('crsBanner').textContent=crs.master_ok?`Final CRS: ${crs.master_crs}. Other layers will be reprojected to match NPAAAD / SAFDZ.`:(crs.error||'NPAAAD and SAFDZ must have matching, readable coordinate systems.');
+   for(const [role,label] of Object.entries(labels)){
+    const meta=data[role];if(!meta)continue;const card=document.createElement('div');card.className='layer-card';
+    card.innerHTML=`<h3>${label}</h3><label>Classification field<select name="${role}_field">${(meta.fields||[]).map(f=>`<option value="${esc(f)}" ${f===meta.suggested_field?'selected':''}>${esc(f)}</option>`).join('')}</select></label>`;
+    if(role==='elu'){
+     card.innerHTML+='<div id="eluMapBox" class="elu-map"><h3>ELU Description Mapping</h3><p class="hint">Select a category for every description. Other / Ignore produces no ELU-based recommendation for that description.</p><div id="eluMapRows" class="elu-map-rows"></div><p id="mappingCount" class="mapping-count" aria-live="polite"></p><label class="mapping-review"><input type="checkbox" id="eluReviewed" name="elu_reviewed" value="yes"><span>I reviewed all categories, including any descriptions marked Other / Ignore.</span></label></div>';
+    }
+    cards.append(card);
+    card.querySelector('select').addEventListener('change',e=>{if(role==='elu')renderElu(e.target.value);refresh();});
+   }
+   mapping.classList.remove('hidden');setStep(1);
+   if(data.elu){renderElu(file('elu_field').value);$('eluReviewed').addEventListener('change',()=>{
+    if($('eluReviewed').checked){const allIgnored=Object.values(eluMap).every(v=>v==='OTHER');notice(allIgnored?'Mapping confirmed. All ELU descriptions are ignored; ELU-based Decision recommendations will be blank.':'Mapping confirmed. Ready to run harmonization.',allIgnored?'warning':'ready');}
+    else notice('Confirm the ELU mapping to continue.','warning');refresh();
+   });}
+   if(!crs.master_ok)notice(crs.error||'Upload NPAAAD and SAFDZ with matching coordinate systems.','error');
+   refresh();
+  }catch(error){if(current!==sequence||error.name==='AbortError')return;inspected=false;mapping.classList.add('hidden');notice(error.message,'error');refresh();}
+ }
+ function syncSources(){
+  const automatic=!!island.value,chosen=automatic&&!!province.value;
+  province.disabled=!automatic;
+  manual.open=!automatic;
+  for(const name of ['npaaad_zip','safdz_zip']){file(name).required=!automatic;file(name).disabled=automatic;}
+  $('r2_status').textContent=chosen?'NPAAAD and SAFDZ datasets available for '+province.selectedOptions[0].textContent+'.':automatic?'Choose a province. Only provinces with both datasets are listed.':'Manual mode: NPAAAD ZIP and SAFDZ ZIP are both required.';
+  inspectNow();
+ }
+ island.addEventListener('change',()=>{
+  province.innerHTML='<option value="">Choose province</option>';
+  for(const name of [...new Set(datasets.filter(row=>row.island===island.value).map(row=>row.province))].sort()){
+   const layers=datasets.filter(row=>row.island===island.value&&row.province===name).map(row=>row.layer);
+   if(layers.includes('npaaad')&&layers.includes('safdz'))province.add(new Option(name.replaceAll('-',' ').toUpperCase(),name));
+  }
+  syncSources();
+ });
+ province.addEventListener('change',syncSources);
+ form.addEventListener('change',event=>{if(event.target.type==='file')inspectNow();});
+ fetch('/api/r2/datasets').then(r=>readJSON(r,'Automatic datasets are unavailable.')).then(data=>{
+  if(data.error)throw Error(data.error);datasets=data.datasets||[];
+  for(const name of [...new Set(datasets.map(row=>row.island))].sort())island.add(new Option(name.toUpperCase(),name));
+ }).catch(error=>{$('r2_status').textContent=error.message+' You can use manual uploads instead.';});
+ function lockInputs(locked){
+  for(const el of form.querySelectorAll('input,select')){
+   if(locked){el.dataset.preJobDisabled=String(el.disabled);el.disabled=true;}
+   else{el.disabled=el.dataset.preJobDisabled==='true';delete el.dataset.preJobDisabled;}
+  }
+  refresh();
+ }
+ const pause=ms=>new Promise(resolve=>setTimeout(resolve,ms));
+ form.addEventListener('submit',async event=>{
+  event.preventDefault();if(busy||!ready()||!form.reportValidity())return;
+  const payload=new FormData(form);busy=true;lockInputs(true);setStep(2);
+  const panel=$('progressPanel'),status=$('progressStatus'),step=$('progressStep'),download=$('downloadBtn');
+  panel.classList.remove('hidden');$('errorDetails').classList.add('hidden');$('detailsBtn').classList.add('hidden');download.classList.add('hidden');
+  status.textContent='Starting harmonization…';step.textContent='Uploading files and preparing selected datasets';$('progressPct').textContent='0%';$('progressBar').style.width='0%';document.querySelector('.progress-track').setAttribute('aria-valuenow','0');$('elapsed').textContent='Elapsed: 00:00';
+  panel.scrollIntoView({behavior:matchMedia('(prefers-reduced-motion: reduce)').matches?'auto':'smooth',block:'center'});panel.focus({preventScroll:true});
+  try{
+   const data=await readJSON(await fetch('/process_start',{method:'POST',body:payload}),'Unable to start processing. Please retry.');
+   if(!data.job_id)throw Error('The server did not provide a job ID. Please retry.');
+   for(;;){
+    await pause(1000);
+    const response=await fetch('/progress/'+encodeURIComponent(data.job_id),{cache:'no-store'});
+    const job=await readJSON(response,response.status===404?'This job is no longer available. The service may have restarted. Please run it again.':'Unable to read processing progress. Please retry.');
+    const percent=job.status==='complete'?100:Math.max(0,Math.min(99,Number(job.percent)||0));
+    $('progressBar').style.width=percent+'%';$('progressPct').textContent=percent+'%';document.querySelector('.progress-track').setAttribute('aria-valuenow',String(percent));
+    status.textContent='Processing…';step.textContent=job.step||'Processing GIS layers';const seconds=Math.max(0,Math.floor(Number(job.elapsed)||0));$('elapsed').textContent='Elapsed: '+String(Math.floor(seconds/60)).padStart(2,'0')+':'+String(seconds%60).padStart(2,'0');
+    setStep(percent<15?2:percent<36?3:percent<80?4:5);
+    if(job.status==='error'){const error=Error(job.error||'Processing failed.');error.details=job.details;throw error;}
+    if(job.status==='complete'){status.textContent='Processing complete';step.textContent='Your results are ready to download.';download.href='/download/'+encodeURIComponent(data.job_id);download.classList.remove('hidden');setStep(5,true);break;}
+   }
+  }catch(error){status.textContent='Processing failed';step.textContent=error.message;$('errorDetails').textContent=error.details||error.message;$('detailsBtn').classList.remove('hidden');setStep(1);}
+  finally{busy=false;lockInputs(false);refresh();}
+ });
+ $('detailsBtn').addEventListener('click',()=>{$('errorDetails').classList.toggle('hidden');$('detailsBtn').textContent=$('errorDetails').classList.contains('hidden')?'View Details':'Hide Details';});
+ window.addEventListener('beforeunload',event=>{if(busy){event.preventDefault();event.returnValue='';}});
+ setStep(0);syncSources();
+})();

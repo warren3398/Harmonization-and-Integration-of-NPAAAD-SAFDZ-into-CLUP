@@ -1,100 +1,37 @@
 <!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>NPAAAD/SAFDZ–CLUP Harmonization</title><link rel="stylesheet" href="/static/style.css"></head>
-<body><div class="shell"><aside>
+<title>NPAAAD/SAFDZ–CLUP Harmonization</title><link rel="stylesheet" href="/static/style.css"><link rel="stylesheet" href="/static/harmonizer.css?v=1"></head>
+<body class="harmonizer-page"><div class="shell"><aside>
 <div class="agency-brand">
   <div class="agency-logos"><img class="bswm-logo" src="/static/assets/da_bswm_logo.png" alt="DA BSWM logo"><img class="almed-logo" src="/static/assets/almed_logo.png" alt="ALMED logo"></div>
   <div class="brand-copy"><div class="sub">NPAAAD / SAFDZ → CLUP</div></div>
 </div>
-<ol class="steps"><li class="active">1. Upload Data</li><li>2. Field Mapping</li><li>3. Validate & Clean</li><li>4. Reproject & Dissolve</li><li>5. Clip & Union</li><li>6. Compute & Export</li></ol></aside>
+<ol class="steps"><li class="active">Upload Data</li><li>Field Mapping</li><li>Validate & Clean</li><li>Reproject & Dissolve</li><li>Clip & Union</li><li>Compute & Export</li></ol></aside>
 <main><section class="hero">
 <div class="hero-copy">
   <div class="agency-title"><strong>Department of Agriculture</strong><strong>Bureau of Soils and Water Management</strong><strong>Agricultural Land Management and Evaluation Division</strong></div>
   <h1>Harmonization and Integration of <span>NPAAAD/SAFDZ</span> into CLUP <small>v2.7</small></h1>
   <p>Web-based GIS harmonization workspace · NPAAAD/SAFDZ authoritative CRS</p>
 </div><div class="header-actions"><div class="status"><i></i> WEB WORKSPACE</div><a class="logout-btn" href="/logout">Logout</a></div></section>
-<form id="mainForm" action="/process_start" method="post" enctype="multipart/form-data" class="card">
+<div id="workflowStatus" class="workflow-status" role="status" aria-live="polite">Step 1 of 6 · Upload Data</div><form id="mainForm" action="/process_start" method="post" enctype="multipart/form-data" class="card">
 <h2>1. Upload GIS Layers</h2><p class="hint">Upload each shapefile as a ZIP containing .shp, .shx, .dbf and .prj.</p>
 <div class="grid">
 <label>Existing / Actual Land Use (ELU) *<input type="file" name="elu_zip" accept=".zip" required></label>
-<label>Approved / Proposed CLUP (optional)<input type="file" name="clup_zip" accept=".zip"></label>
-<div style="grid-column:1/-1;border:1px solid #d5e0d8;border-radius:12px;padding:14px"><h3 style="margin:0 0 8px">NPAAAD / SAFDZ — Automatic Dataset Selection</h3><p class="hint">Select the island group and province. NPAAAD and SAFDZ GeoPackages will be retrieved automatically from Cloudflare R2.</p><div style="display:grid;grid-template-columns:1fr 1fr;gap:12px"><label>Island Group<select name="r2_island" id="r2_island"><option value="">Manual ZIP upload</option></select></label><label>Province<select name="r2_province" id="r2_province"><option value="">Choose province</option></select></label></div><p id="r2_status" class="hint">Checking R2 datasets…</p><details id="manualR2"><summary>Manual NPAAAD / SAFDZ ZIP upload (optional)</summary><div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:10px"><label>NPAAAD ZIP<input type="file" name="npaaad_zip" accept=".zip"></label><label>SAFDZ ZIP<input type="file" name="safdz_zip" accept=".zip"></label></div></details></div>
-<label>Land Cover Map 2025 (optional)<input type="file" name="landcover_zip" accept=".zip"></label>
-<label>Poultry Shapefile (optional)<input type="file" name="poultry_zip" accept=".zip"></label></div>
-<div id="inspectMsg" class="note">Select shapefile ZIPs. Fields and CRS are detected automatically.</div>
-<div id="mapping" class="hidden"><h2>2. Layer Settings</h2><div id="crsBanner" class="crs-banner"></div><input type="hidden" name="elu_mapping" id="eluMapping" value="{}"><div id="layerCards" class="layer-cards"></div></div>
-<div class="rules"><div><b>Aglng-SZ</b><span>SAFDZ = 2</span></div><div><b>PTA-SZ</b><span>NPAAAD = A, B, D, E, F, G</span></div><div><b>PDA-SZ</b><span>NPAAAD = C</span></div></div>
-<button type="submit" id="runBtn" disabled>▶ RUN HARMONIZATION</button>
-<div id="progressPanel" class="progress-panel hidden">
+
+<div class="dataset-panel"><h3 style="margin:0 0 8px">NPAAAD / SAFDZ — Automatic Dataset Selection</h3><p class="hint">Choose a province to load its NPAAAD and SAFDZ datasets automatically, or select manual ZIP upload.</p><div class="dataset-grid"><label>Island Group<select name="r2_island" id="r2_island"><option value="">Manual ZIP upload</option></select></label><label>Province<select name="r2_province" id="r2_province" disabled><option value="">Choose province</option></select></label></div><p id="r2_status" class="hint">Checking R2 datasets…</p><details id="manualR2"><summary>Manual NPAAAD / SAFDZ ZIP upload — both required in manual mode</summary><div class="dataset-grid manual-grid"><label>NPAAAD ZIP<input type="file" name="npaaad_zip" accept=".zip"></label><label>SAFDZ ZIP<input type="file" name="safdz_zip" accept=".zip"></label></div></details></div>
+</div><details class="optional-layers"><summary>Advanced Options · Optional GIS layers</summary><p class="hint">Add these only when needed for your analysis.</p><div class="grid"><label>Approved / Proposed CLUP (optional)<input type="file" name="clup_zip" accept=".zip"></label><label>Land Cover Map 2025 (optional)<input type="file" name="landcover_zip" accept=".zip"></label>
+<label>Poultry Shapefile (optional)<input type="file" name="poultry_zip" accept=".zip"></label></div></details>
+<div id="inspectMsg" class="inspection-status" role="status" aria-live="polite">Select shapefile ZIPs. Fields and CRS are detected automatically.</div>
+<div id="mapping" class="hidden" tabindex="-1"><h2>2. Layer Settings</h2><div id="crsBanner" class="crs-banner"></div><input type="hidden" name="elu_mapping" id="eluMapping" value="{}"><div id="layerCards" class="layer-cards"></div></div>
+<details class="method-rules"><summary>Classification rules</summary><div class="rules"><div><b>Aglng-SZ</b><span>SAFDZ = 2</span></div><div><b>PTA-SZ</b><span>NPAAAD = A, B, D, E, F, G</span></div><div><b>PDA-SZ</b><span>NPAAAD = C</span></div></div>
+</details><div class="run-actions"><button type="submit" id="runBtn" disabled>Run Harmonization</button><span id="runHint">Complete uploads and review field mapping to continue.</span></div>
+<div id="progressPanel" class="progress-panel hidden" tabindex="-1" aria-live="polite">
   <div class="progress-top"><b id="progressStatus">Processing...</b><span id="progressPct">0%</span></div>
-  <div class="progress-track"><div id="progressBar" class="progress-bar"></div></div>
+  <div class="progress-track" role="progressbar" aria-label="Harmonization progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><div id="progressBar" class="progress-bar"></div></div>
   <div id="progressStep" class="progress-step">Preparing data</div>
   <div class="progress-bottom"><span id="elapsed">Elapsed: 00:00</span><button type="button" id="detailsBtn" class="link-btn hidden">View Details</button></div>
   <pre id="errorDetails" class="error-details hidden"></pre>
   <a id="downloadBtn" class="download-btn hidden">Download Results</a>
 </div>
 <div class="note">Output ZIP: Excel Summary + Union Shapefile + QA/QC report + clipped Poultry Shapefile (when uploaded)</div></form></main></div>
-<script>
-const form=document.getElementById('mainForm'),msg=document.getElementById('inspectMsg'),mapping=document.getElementById('mapping'),cards=document.getElementById('layerCards'),run=document.getElementById('runBtn');
-const labels={elu:'Existing / Actual Land Use (ELU)',clup:'Approved / Proposed CLUP',npaaad:'NPAAAD',safdz:'SAFDZ',landcover:'Land Cover Map 2025',poultry:'Poultry Shapefile'};
-const fieldNames={elu:'elu_field',npaaad:'npaaad_field',safdz:'safdz_field',landcover:'landcover_field',clup:'clup_field'};
-let inspectData={};
-let r2Rows=[];const islandSel=document.getElementById('r2_island'),provinceSel=document.getElementById('r2_province');
-fetch('/api/r2/datasets').then(r=>r.json()).then(data=>{if(data.error)throw Error(data.error);r2Rows=data.datasets||[];for(const island of [...new Set(r2Rows.map(x=>x.island))].sort()){let o=document.createElement('option');o.value=island;o.textContent=island.toUpperCase();islandSel.appendChild(o)}document.getElementById('r2_status').textContent=r2Rows.length+' R2 GeoPackages found'}).catch(e=>document.getElementById('r2_status').textContent='R2 unavailable: '+e.message);
-islandSel.addEventListener('change',()=>{provinceSel.innerHTML='<option value="">Choose province</option>';for(const province of [...new Set(r2Rows.filter(x=>x.island===islandSel.value).map(x=>x.province))].sort()){const layers=r2Rows.filter(x=>x.island===islandSel.value&&x.province===province).map(x=>x.layer);if(!layers.includes('npaaad')||!layers.includes('safdz'))continue;const o=document.createElement('option');o.value=province;o.textContent=province.replaceAll('-',' ').toUpperCase();provinceSel.appendChild(o)}syncR2()});
-provinceSel.addEventListener('change',syncR2);document.getElementById('manualR2').open=false;
-function syncR2(){const chosen=!!(islandSel.value&&provinceSel.value);document.getElementById('manualR2').open=!chosen;for(const name of ['npaaad_zip','safdz_zip']){const el=form.querySelector('[name="'+name+'"]');el.required=!chosen;el.disabled=chosen}inspectNow()}
-
-function renderEluMap(field){
- const box=document.getElementById('eluMapBox'),rows=document.getElementById('eluMapRows'),hidden=document.getElementById('eluMapping');
- if(!box||!rows||!hidden)return;
- const vals=(inspectData && inspectData.elu && inspectData.elu.field_values && inspectData.elu.field_values[field]) || [];
- rows.innerHTML=''; const map={};
- for(const v of vals){
-   const row=document.createElement('div'); row.className='elu-map-row';
-   row.innerHTML=`<span title="${esc(v)}">${esc(v)}</span><select aria-label="Map ${esc(v)}"><option value="OTHER">Other / Ignore</option><option value="AGR">AGR</option><option value="BU">BU</option></select>`;
-   const sel=row.querySelector('select'); map[v]='OTHER';
-   sel.addEventListener('change',()=>{map[v]=sel.value;hidden.value=JSON.stringify(map)});
-   rows.appendChild(row);
- }
- hidden.value=JSON.stringify(map);
- box.classList.toggle('hidden',vals.length===0);
- const count=box.querySelector('.elu-count'); if(count)count.textContent=vals.length+' unique value'+(vals.length===1?'':'s');
-}
-function esc(s){return String(s??'').replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));}
-let inspectSeq=0, inspectTimer=null;
-function inspectNow(){clearTimeout(inspectTimer);const seq=++inspectSeq;inspectTimer=setTimeout(()=>performInspect(seq),500)}
-async function performInspect(seq){
- if(![...form.querySelectorAll('input[type=file]')].some(x=>x.files?.length)){run.disabled=true;mapping.classList.add('hidden');msg.textContent='Select a province and upload ELU ZIP to inspect GIS fields.';return;}
- if(!islandSel.value && !form.querySelector('[name="npaaad_zip"]').files.length){run.disabled=true;msg.textContent='Select an island group and province, or upload NPAAAD and SAFDZ ZIPs.';return;}
- if(islandSel.value&&!provinceSel.value){run.disabled=true;msg.textContent='Choose a province before inspecting layers.';return;}
- run.disabled=true;msg.textContent='Inspecting GIS fields and NPAAAD/SAFDZ CRS…';
- try{const fd=new FormData(form),r=await fetch('/inspect',{method:'POST',body:fd});const body=await r.text();if(seq!==inspectSeq)return;let data;try{data=JSON.parse(body)}catch{throw new Error('Server returned an HTML or empty response during GIS inspection. Try again after the service restarts, or select a smaller dataset.')}if(!r.ok)throw new Error(data.error||'Unable to inspect files.');
- inspectData=data;cards.innerHTML='';const crs=data._crs_summary||{},banner=document.getElementById('crsBanner');
- if(crs.master_ok){banner.className='crs-banner ok';banner.innerHTML='✓ <b>Final CRS:</b> '+esc(crs.master_crs)+' <span class="muted">(from NPAAAD / SAFDZ)</span>';}else{banner.className='crs-banner warn';banner.innerHTML='⚠ <b>Final CRS:</b> '+esc(crs.error||'Upload both NPAAAD and SAFDZ to detect the master CRS.');}
- for(const role of ['elu','clup','npaaad','safdz','landcover']){const m=data[role];if(!m)continue;const div=document.createElement('div');div.className='layer-card minimalist';const opts=m.fields.map(f=>`<option value="${esc(f)}" ${f===m.suggested_field?'selected':''}>${esc(f)}</option>`).join('');
- div.innerHTML=`<h3>${labels[role]}</h3><div class="final-crs"><b>Final CRS</b><span>${esc(crs.master_ok?crs.master_crs:'Waiting for NPAAAD / SAFDZ')}</span></div><label>Classification Field<select name="${fieldNames[role]}">${opts}</select></label>${role==='elu'?`<div id="eluMapBox" class="elu-map hidden"><div class="elu-map-head"><div><h3>ELU Description Mapping</h3><p class="hint">Check each description using the dropdown: AGR, BU, or Other / Ignore.</p></div><b class="elu-count"></b></div><div id="eluMapRows" class="elu-map-rows"></div></div>`:''}`;cards.appendChild(div);if(role==='elu'){const sel=div.querySelector('select[name="elu_field"]');sel.addEventListener('change',()=>renderEluMap(sel.value));renderEluMap(sel.value);}}
- mapping.classList.remove('hidden');const required=!!form.querySelector('[name="elu_zip"]').files.length && ((!!islandSel.value&&!!provinceSel.value)||['npaaad_zip','safdz_zip'].every(n=>form.querySelector('[name="'+n+'"]').files.length));run.disabled=!(required&&crs.master_ok);msg.textContent=crs.master_ok?'✓ Ready. Other layers will be reprojected automatically to the Final CRS.':'Upload matching NPAAAD and SAFDZ layers to establish the Final CRS.';
- }catch(e){if(seq!==inspectSeq)return;run.disabled=true;mapping.classList.add('hidden');msg.textContent='Error: '+e.message;}
-}
-form.addEventListener('change',e=>{if(e.target.type==='file')inspectNow();});
-
-form.addEventListener('submit',async e=>{
- e.preventDefault(); if(run.disabled)return;
- const panel=document.getElementById('progressPanel'),bar=document.getElementById('progressBar'),pct=document.getElementById('progressPct'),status=document.getElementById('progressStatus'),step=document.getElementById('progressStep'),elapsed=document.getElementById('elapsed'),details=document.getElementById('errorDetails'),detailsBtn=document.getElementById('detailsBtn'),download=document.getElementById('downloadBtn');
- panel.classList.remove('hidden'); details.classList.add('hidden'); detailsBtn.classList.add('hidden'); download.classList.add('hidden'); run.disabled=true; status.textContent='Processing...'; step.textContent='Preparing data'; bar.style.width='0%'; pct.textContent='0%';
- try{
-   const r=await fetch('/process_start',{method:'POST',body:new FormData(form)});const raw=await r.text();let d;try{d=JSON.parse(raw)}catch{throw new Error('The server did not return valid JSON when starting the job. Please check Render logs and retry.')} if(!r.ok)throw new Error(d.error||'Unable to start processing.');
-   const id=d.job_id;
-   const timer=setInterval(async()=>{
-     try{const pr=await fetch('/progress/'+id,{cache:'no-store'});const raw=await pr.text();let j;try{j=JSON.parse(raw)}catch{throw new Error('The processing server returned an empty or non-JSON response. The GIS job may have exhausted server memory or restarted. Please try a smaller ELU area; check Render logs.')} if(!pr.ok){if(pr.status===404)throw new Error('Processing was interrupted because the Render service restarted or redeployed. The previous job cannot be resumed; please run it again after deployment finishes.');throw new Error(j.error||'Unable to read progress.');}
-       const n=Math.max(0,Math.min(100,j.percent||0)); bar.style.width=n+'%'; pct.textContent=n+'%'; step.textContent=j.step||'Processing'; const sec=j.elapsed||0; elapsed.textContent='Elapsed: '+String(Math.floor(sec/60)).padStart(2,'0')+':'+String(sec%60).padStart(2,'0');
-       if(j.status==='complete'){clearInterval(timer);status.textContent='✓ Processing Complete';download.href='/download/'+id;download.classList.remove('hidden');run.disabled=false;}
-       else if(j.status==='error'){clearInterval(timer);status.textContent='✕ Processing Failed';step.textContent=j.error||'An error occurred';details.textContent=j.details||j.error||'';detailsBtn.classList.remove('hidden');run.disabled=false;}
-     }catch(err){clearInterval(timer);status.textContent='✕ Processing Failed';step.textContent=err.message;run.disabled=false;}
-   },700);
- }catch(err){status.textContent='✕ Processing Failed';step.textContent=err.message;run.disabled=false;}
-});
-document.getElementById('detailsBtn').addEventListener('click',()=>document.getElementById('errorDetails').classList.toggle('hidden'));
-
-</script></body></html>
+<script src="/static/harmonizer.js?v=1" defer></script></body></html>

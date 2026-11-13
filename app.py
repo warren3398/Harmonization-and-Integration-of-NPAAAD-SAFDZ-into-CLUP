@@ -854,6 +854,23 @@ def extract_zip_path(zpath: Path, dest: Path):
         raise ValueError(f'No .shp file found in {zpath.name}')
     return shp_files[0]
 
+def validate_elu_mapping(mapping, values=None):
+    if not isinstance(mapping, dict) or not mapping:
+        raise ValueError('Review every ELU description and confirm its category before processing.')
+    cleaned = {}
+    for key, value in mapping.items():
+        category = str(value).strip().upper()
+        if category not in {'AGR', 'BU', 'OTHER'}:
+            raise ValueError('Every ELU description needs AGR, BU, or Other / Ignore. Review the field mapping.')
+        cleaned[str(key).strip()] = category
+    if values is not None:
+        expected = {str(value).strip() for value in values if not pd.isna(value) and str(value).strip()}
+        missing = expected - set(cleaned)
+        if missing:
+            raise ValueError(f'{len(missing)} ELU descriptions have no reviewed category. Inspect the current files and select the correct classification field; fields with more than 1,000 unique descriptions need a categorical field.')
+    return cleaned
+
+
 def run_background(job_id, job, uploads, fields, elu_mapping):
     started=time.time()
     def progress(pct, step):
@@ -879,6 +896,7 @@ def run_background(job_id, job, uploads, fields, elu_mapping):
         for label, gdf, key in [('ELU',elu_raw,'elu'),('NPAAAD',np_raw,'npaaad'),('SAFDZ',saf_raw,'safdz')]:
             if fields[key] not in gdf.columns:
                 raise ValueError(f"{label} classification field '{fields[key]}' was not found. Please select a valid field before processing.")
+        elu_mapping=validate_elu_mapping(elu_mapping, elu_raw[fields['elu']])
         elu_p=fast_prepare(elu_raw,fields['elu'],target_crs).rename(columns={fields['elu']:internal['elu']})
         np_p=fast_prepare(np_raw,fields['npaaad'],target_crs).rename(columns={fields['npaaad']:internal['npaaad']})
         saf_p=fast_prepare(saf_raw,fields['safdz'],target_crs).rename(columns={fields['safdz']:internal['safdz']})
@@ -1070,6 +1088,12 @@ def run_background(job_id, job, uploads, fields, elu_mapping):
 @app.route('/process_start', methods=['POST'])
 def process_start():
     try:
+        if request.form.get('elu_reviewed') != 'yes':
+            raise ValueError('Confirm that you reviewed all ELU categories, including Other / Ignore.')
+        try:
+            elu_mapping=validate_elu_mapping(json.loads(request.form.get('elu_mapping','{}') or '{}'))
+        except (json.JSONDecodeError, TypeError):
+            raise ValueError('Invalid ELU mapping. Inspect the files again and review all categories.')
         chosen=r2_selection()
         for r in (['elu_zip'] if chosen else ['elu_zip','npaaad_zip','safdz_zip']):
             if r not in request.files or not request.files[r].filename: raise ValueError(f'Missing required upload: {r}')
@@ -1082,11 +1106,6 @@ def process_start():
         if chosen:
             for role,key in chosen.items(): uploads[role+'_gpkg']=r2_download(key,up/(role+'.gpkg'))
         fields={'elu':request.form.get('elu_field','ELU').strip(),'clup':request.form.get('clup_field','CLUP').strip(),'npaaad':request.form.get('npaaad_field','NPAAAD').strip(),'safdz':request.form.get('safdz_field','SAFDZ').strip(),'landcover':request.form.get('landcover_field','CLASS').strip()}
-        try:
-            elu_mapping=json.loads(request.form.get('elu_mapping','{}') or '{}')
-        except Exception:
-            elu_mapping={}
-        elu_mapping={str(k).strip():str(v).strip().upper() for k,v in elu_mapping.items() if str(v).strip().upper() in {'AGR','BU','OTHER'}}
         set_job(job_id,status='queued',percent=0,step='Preparing data',elapsed=0)
         threading.Thread(target=run_background,args=(job_id,job,uploads,fields,elu_mapping),daemon=True).start()
         return jsonify({'job_id':job_id})
