@@ -16,7 +16,7 @@ jobs:
       - run: pip install -r requirements.txt pytest playwright
       - run: python -m playwright install --with-deps chromium
       - name: Verify detection, exact clipping, cached generation and mobile layout
-        run: python -m pytest tests/test_auto_reference.py tests/test_elu_cleanup.py -v
+        run: python -m pytest tests/test_auto_reference.py tests/test_elu_cleanup.py tests/test_result_download.py -v
       - uses: actions/upload-artifact@v4
         if: always()
         with:
