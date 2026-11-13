@@ -812,21 +812,17 @@ def inspect_layers():
             if automatic and role in ('npaaad','safdz'): continue
             upload=request.files.get(role+'_zip')
             if not upload or not upload.filename: continue
-            frame,meta=inspect_uploaded_shapefile(upload,job/role,role,request.form.get('elu_cleanup_field') if role=='elu' else None)
+            if role=='elu':
+                import elu_analysis,elu_cleanup
+                shp=extract_shapefile_zip(upload,job/role)
+                elu,meta,report,_=elu_analysis.prepare_file(shp,job/role/'upload.zip',upload.filename,request.form.get('elu_cleanup_field'),elu_cleanup.options(request.form),suggest_field)
+                result[role]=meta
+                result['_elu_cleanup']=report
+                continue
+            frame,meta=inspect_uploaded_shapefile(upload,job/role,role)
             suggested=suggest_field(meta['fields'],role)
-            if role=='elu' and request.form.get('elu_cleanup_field') in meta['fields']:
-                suggested=request.form['elu_cleanup_field']
             meta['suggested_field']=suggested
             meta['sample_values']=field_preview(frame,suggested)
-            if role=='elu':
-                import elu_cleanup
-                elu,cleanup_report,cleanup_issues=elu_cleanup.clean(frame,suggested,elu_cleanup.options(request.form))
-                review_token=elu_cleanup.save_review(elu,cleanup_report,cleanup_issues)
-                result['_elu_cleanup']=dict(cleanup_report,review_url='/elu-review/'+review_token)
-                meta['field_values']={}
-                for field in [name for name in frame.columns if name!='geometry']:
-                    values=frame[field].dropna().astype(str).str.strip()
-                    meta['field_values'][field]=values[values!=''].drop_duplicates().sort_values().head(1000).tolist()
             result[role]=meta
         if result.get('_elu_cleanup',{}).get('requires_review'):
             result['_crs_summary']={'master_ok':False,'master_crs':None,'error':'Resolve ELU overlaps or missing classes before reference detection.'}
@@ -1216,16 +1212,17 @@ def process_start():
                 path=up/(name+'.zip')
                 upload.save(path)
                 uploads[name]=path
-        import elu_cleanup
+        import elu_analysis,elu_cleanup
         cleanup_field=request.form.get('elu_field','ELU').strip()
-        original=gpd.read_file(extract_zip_path(uploads['elu_zip'],job/'elu_validate'),columns=[cleanup_field])
-        elu,cleanup_report,cleanup_issues=elu_cleanup.clean(original,cleanup_field,elu_cleanup.options(request.form))
+        shp=extract_zip_path(uploads['elu_zip'],job/'elu_validate')
+        elu,cleanup_meta,cleanup_report,analysis_path=elu_analysis.prepare_file(shp,uploads['elu_zip'],'ELU.zip',cleanup_field,elu_cleanup.options(request.form),suggest_field)
+        if cleanup_meta['suggested_field']!=cleanup_field:raise ValueError('Choose a valid ELU classification field.')
         if cleanup_report['requires_review']:
             raise ValueError('Resolve ELU overlaps or missing classifications before generation. Review the geometry report.')
         if cleanup_report['requires_change_confirmation'] and request.form.get('elu_cleanup_confirmed')!='yes':
             raise ValueError('Confirm the gap filling and/or class-priority changes before generation.')
         review_path=job/'ELU_GEOMETRY_REVIEW.gpkg'
-        elu_cleanup.write_review(review_path,elu,cleanup_issues)
+        shutil.copyfile(analysis_path,review_path)
         uploads['_elu_cleaned_path']=review_path
         uploads['_elu_cleanup_report']=cleanup_report
         if automatic:
@@ -1241,7 +1238,7 @@ def process_start():
         fields={role:request.form.get(role+'_field',default).strip() for role,default in
                 [('elu','ELU'),('clup','CLUP'),('npaaad','NPAAAD'),('safdz','SAFDZ'),('landcover','CLASS')]}
         set_job(job_id,status='queued',percent=0,step='Preparing data',elapsed=0)
-        del original,elu,cleanup_issues
+        del elu
         threading.Thread(target=run_background_guarded,args=(job_id,job,uploads,fields,elu_mapping),daemon=True).start()
         handed_off=True
         return jsonify({'job_id':job_id})

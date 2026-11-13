@@ -11,7 +11,7 @@ from pathlib import Path
 from flask import jsonify
 
 GIS_LOCK=threading.Lock()
-ROOTS=('npaaad_clup_harmonizer','harmonizer-auto-references','harmonizer-elu-reviews')
+ROOTS=('npaaad_clup_harmonizer','harmonizer-auto-references','harmonizer-elu-reviews','harmonizer-elu-analysis')
 SCRATCH_LIMIT=1400*1024*1024
 RESERVE=100*1024*1024
 TTL=3*3600
@@ -51,7 +51,7 @@ def cleanup():
             if folder.name=='eo79_r2':continue
             if not (re.fullmatch('[a-f0-9]{32}',folder.name)):continue
             # An interrupted worker leaves no usable completion metadata.
-            if name=='harmonizer-auto-references' and not (folder/'metadata.json').exists():
+            if name in ('harmonizer-auto-references','harmonizer-elu-analysis') and not (folder/'metadata.json').exists():
                 shutil.rmtree(folder,ignore_errors=True);continue
             status=folder/'job_status.json'
             if name=='npaaad_clup_harmonizer':

@@ -166,7 +166,7 @@ def write_review(path, cleaned, issues):
 
 REVIEW_TTL=3*3600
 
-def save_review(cleaned, report, issues):
+def save_review(cleaned, report, issues, existing_path=None):
     import json, tempfile, time, uuid, zipfile, shutil
     from pathlib import Path
     root=Path(tempfile.gettempdir())/'harmonizer-elu-reviews'
@@ -186,13 +186,13 @@ def save_review(cleaned, report, issues):
     folder.mkdir(exist_ok=True)
     from runtime_limits import ensure_space
     ensure_space()
-    gpkg=folder/'ELU_GEOMETRY_REVIEW.gpkg'
-    write_review(gpkg,cleaned,issues)
+    gpkg=Path(existing_path) if existing_path else folder/'ELU_GEOMETRY_REVIEW.gpkg'
+    if not existing_path:write_review(gpkg,cleaned,issues)
     bundle=folder/'ELU_GEOMETRY_REVIEW.zip'
     with zipfile.ZipFile(bundle,'w',zipfile.ZIP_DEFLATED) as archive:
-        archive.write(gpkg,gpkg.name)
+        archive.write(gpkg,'ELU_GEOMETRY_REVIEW.gpkg')
         archive.writestr('ELU_CLEANUP_REPORT.json',json.dumps(report,indent=2))
-    gpkg.unlink()
+    if not existing_path:gpkg.unlink()
     return token
 
 

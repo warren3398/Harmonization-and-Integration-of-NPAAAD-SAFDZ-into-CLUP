@@ -121,3 +121,28 @@ def test_gap_with_nested_different_class_island_is_not_filled():
  assert report['enclosed_gaps_detected']==1 and report['gaps_filled']==0
  assert report['gap_area_detected_m2']==12
  assert cleaned.geometry.area.sum()==88
+
+
+def test_elu_analysis_reuses_identical_bytes_and_invalidates_settings(tmp_path,monkeypatch):
+ import elu_analysis
+ monkeypatch.setattr(elu_analysis,'ROOT',tmp_path/'analysis')
+ outer=box(500000,1500000,500020,1500020);hole=box(500002,1500002,500004,1500004)
+ data=frame(['Agriculture'],[Polygon(outer.exterior.coords,[hole.exterior.coords])])
+ raw=zipped(tmp_path,data)
+ zip_path=tmp_path/'elu.zip';zip_path.write_bytes(raw)
+ shape=tmp_path/'elu'/'elu.shp'
+ original=elu_cleanup.clean;calls=[]
+ def clean(*args):calls.append(1);return original(*args)
+ monkeypatch.setattr(elu_cleanup,'clean',clean)
+ first=elu_analysis.prepare_file(shape,zip_path,'elu.zip',None,settings(),module.suggest_field)
+ again=elu_analysis.prepare_file(shape,zip_path,'renamed.zip','LAND_USE',settings(),module.suggest_field)
+ assert len(calls)==1 and again[1]['filename']=='renamed.zip'
+ assert again[2]['review_url']==first[2]['review_url']
+ changed=elu_analysis.prepare_file(shape,zip_path,'elu.zip','LAND_USE',settings(fill_gaps=True),module.suggest_field)
+ assert len(calls)==2 and changed[2]['gaps_filled']==1
+ assert changed[3]!=first[3]
+ changed_data=data.copy();changed_data['LAND_USE']='Commercial'
+ modified=zipped(tmp_path,changed_data,name='modified')
+ modified_zip=tmp_path/'modified.zip';modified_zip.write_bytes(modified)
+ new=elu_analysis.prepare_file(tmp_path/'modified'/'elu.shp',modified_zip,'modified.zip','LAND_USE',settings(),module.suggest_field)
+ assert len(calls)==3 and new[1]['field_values']['LAND_USE']==['Commercial']
