@@ -2,7 +2,7 @@
 document.addEventListener('DOMContentLoaded',()=>{
 const $=id=>document.getElementById(id),sidebar=document.querySelector('.sidebar'),stage=document.querySelector('.stage');
 if(!sidebar||!stage||!$('printLayout'))return;
-document.body.dataset.eo79Layout='responsive-1';
+document.body.dataset.eo79Layout='responsive-2';
 const sections=[$('sec1'),$('sec2'),$('sec5')];
 sections.forEach((sec,i)=>{const heading=sec.querySelector('h2');heading.textContent=heading.textContent.replace(/^\d+\.\s*/,'');heading.dataset.step=String(i+1);sec.querySelector('.detail-toggle')?.remove();});
 $('sec5').querySelector('h2').textContent='Generate & Download';
@@ -16,7 +16,16 @@ const parcelDetails=$('sec1').querySelector('.section-details'),parcelStatus=$('
 while(parcelDetails.firstChild)coordinateSection.append(parcelDetails.firstChild);
 $('sec1').append(parcelStatus);parcelDetails.remove();
 coordinateSection.querySelector('button').textContent='Reload parcel and auto-fix';
-extras.append(coordinateSection,$('sec3'),$('sec4'));
+extras.append(coordinateSection,$('sec3'));
+const mapDetails=$('sec4');mapDetails.classList.add('eo79-map-details');mapDetails.querySelector('.detail-toggle')?.remove();
+mapDetails.querySelector('h2').textContent='Map Title / Details';
+mapDetails.querySelector('.section-top').append($('applyText'));
+const textFields=document.createElement('div');textFields.className='eo79-map-text-fields';
+for(const id of ['titleInput','permitInput','locationInput']){
+ const input=$(id),label=input.previousElementSibling,field=document.createElement('div');field.className='eo79-map-text-field'+(id==='titleInput'?' full':'');
+ if(label?.tagName==='LABEL')field.append(label);field.append(input);textFields.append(field);
+}
+mapDetails.querySelector('.section-details').replaceChildren(textFields);
 extras.querySelectorAll('.detail-toggle').forEach(el=>el.remove());
 extras.querySelectorAll('h2').forEach(el=>el.textContent=el.textContent.replace(/^\d+\.\s*/,''));
 $('sec5').querySelector('.section-details').style.display='block';
@@ -39,7 +48,7 @@ const orientationLabel=document.createElement('label');orientationLabel.htmlFor=
 const previewHint=document.createElement('p');previewHint.className='eo79-preview-hint';previewHint.textContent='Fit Page shows the whole sheet. Use + or Fit Width to read details. Preview zoom does not change export quality.';
 const viewport=document.createElement('div');viewport.id='eo79-preview-viewport';viewport.tabIndex=0;viewport.setAttribute('aria-label','Scrollable map page preview');
 const paperSpace=document.createElement('div');paperSpace.id='eo79-paper-space';const wrap=$('layoutWrap');
-viewport.append(paperSpace);paperSpace.append(wrap);stage.append(tools,previewHint,viewport);
+viewport.append(paperSpace);paperSpace.append(wrap);stage.append(mapDetails,tools,previewHint,viewport);
 $('sec5').querySelectorAll('.btnrow').forEach(row=>{if([...row.children].every(el=>el.hidden))row.hidden=true;});
 document.querySelectorAll('.section label').forEach(label=>{if(label.htmlFor||label.querySelector('input,select'))return;const next=label.nextElementSibling;if(next?.id&&/INPUT|SELECT|TEXTAREA/.test(next.tagName))label.htmlFor=next.id;});
 let mode='page',scale=1,exporting=false,activeActions=0,successfulFile=null,currentError=false,lastActionFailed=false;
@@ -87,7 +96,10 @@ document.querySelectorAll('.eo79-format').forEach(el=>el.addEventListener('chang
 window.eo79UI={setStatus,refresh,canExport,startExport(){exporting=true;refresh();},finishExport(message,error=false){exporting=false;setStatus(message,{state:error?'error':'success'});refresh();}};
 function resizePreview(){
  if(document.body.classList.contains('eo79-exporting'))return;
+ if(innerWidth<=900){if(mapDetails.parentElement!==sidebar)sidebar.insertBefore(mapDetails,$('sec5'));}
+ else if(mapDetails.parentElement!==stage)stage.insertBefore(mapDetails,tools);
  const headerHeight=document.querySelector('header').getBoundingClientRect().height;document.documentElement.style.setProperty('--eo79-header-height',headerHeight+'px');
+ document.documentElement.style.setProperty('--eo79-editor-height',(mapDetails.parentElement===stage?mapDetails.getBoundingClientRect().height:0)+'px');
  const paper=$('printLayout'),width=paper.offsetWidth,height=paper.offsetHeight;
  const padding=parseFloat(getComputedStyle(viewport).paddingLeft)*2;
  const availableHeight=innerWidth<=900?innerHeight*(innerWidth<=540?.70:.75):viewport.clientHeight;
@@ -100,7 +112,7 @@ function fitPage(){mode='page';resizePreview();viewport.scrollTo(0,0);}
 $('eo79-fit-page').onclick=fitPage;$('eo79-fit-width').onclick=()=>{mode='width';resizePreview();viewport.scrollTo(0,0);};
 $('eo79-zoom-in').onclick=()=>{mode='manual';scale=Math.min(2,scale*1.25);resizePreview();};$('eo79-zoom-out').onclick=()=>{mode='manual';scale=Math.max(.05,scale/1.25);resizePreview();};
 orientation.addEventListener('change',()=>{mode='page';requestAnimationFrame(resizePreview);setTimeout(resizePreview,220);});
-const observer=new ResizeObserver(()=>requestAnimationFrame(resizePreview));observer.observe(stage);observer.observe(document.querySelector('header'));
+const observer=new ResizeObserver(()=>requestAnimationFrame(resizePreview));observer.observe(stage);observer.observe(document.querySelector('header'));observer.observe(mapDetails);
 window.addEventListener('resize',()=>requestAnimationFrame(resizePreview));
 window.eo79Preview={fitPage,resize:resizePreview,beginExport(){const scroll={x:viewport.scrollLeft,y:viewport.scrollTop,page:window.scrollY};document.body.classList.add('eo79-exporting');return ()=>{document.body.classList.remove('eo79-exporting');resizePreview();viewport.scrollTo(scroll.x,scroll.y);window.scrollTo(0,scroll.page);};}};
 // Render at the original print dimensions, independent of preview zoom.
