@@ -398,7 +398,7 @@ def write_excel(summary_df, union_df, qa, out_path, poultry_by_elu=None):
     for c in qa_ws[1]: c.fill = header_fill; c.font = bold_font; c.border = border
     for layer,items in qa.items():
         for key,val in items.items():
-            qa_ws.append([layer,key,val])
+            qa_ws.append([layer,key,json.dumps(val,ensure_ascii=False) if isinstance(val,(dict,list)) else val])
     for row in qa_ws.iter_rows():
         for c in row: c.border = border
     qa_ws.column_dimensions['A'].width=20; qa_ws.column_dimensions['B'].width=28; qa_ws.column_dimensions['C'].width=18

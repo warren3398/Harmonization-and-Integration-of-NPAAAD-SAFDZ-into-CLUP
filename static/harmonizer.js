@@ -96,7 +96,7 @@
    });}
    if(!crs.master_ok)notice(crs.error||'Upload NPAAAD and SAFDZ with matching coordinate systems.','error');
    refresh();
-  }catch(error){if(current!==sequence||error.name==='AbortError')return;inspected=false;mapping.classList.add('hidden');notice(error.message,'error');if(mode.value==='auto')showReference('Reference detection needs attention',error.message,'error');refresh();}
+  }catch(error){if(current!==sequence||error.name==='AbortError')return;if(mode.value==='auto'&&error.message.includes('Another ELU reference detection')){notice('Waiting for reference detection to finish…');showReference('Preparing reference data…','Another detection is finishing. This upload will retry automatically.','loading');debounce=setTimeout(()=>inspect(current),2500);return;}inspected=false;mapping.classList.add('hidden');notice(error.message,'error');if(mode.value==='auto')showReference('Reference detection needs attention',error.message,'error');refresh();}
  }
  function syncSources(){
   const manual=manualToggle.checked;

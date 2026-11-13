@@ -31,8 +31,7 @@ def canonical(name):
     value = re.sub('[^a-z0-9]', '', name.lower())
     return {'davaodeoro':'compostelavalley', 'dinagatisland':'dinagatislands',
             'westernsamar':'samar', 'basilang':'basilan', 'cotabato':'northcotabato',
-            'metromanila':'metropolitanmanila', 'maguindanaodelnorte':'maguindanao',
-            'maguindanaodelsur':'maguindanao'}.get(value, value)
+            'metromanila':'metropolitanmanila'}.get(value, value)
 
 
 @lru_cache(maxsize=1)
@@ -52,7 +51,7 @@ def regions():
         raise ValueError('The reference location index is incomplete. Retry detection shortly.')
     result = {canonical(f['properties']['NAME_1']):shape(f['geometry']).buffer(0.01) for f in features}
     # Conservative parent masks handle older GADM province divisions and cities.
-    for child,parent in [('davaooccidental','davaodelsur'),('cotabatocity','maguindanao'),('isabelacity','basilan')]:
+    for child,parent in [('davaooccidental','davaodelsur'),('cotabatocity','maguindanao'),('isabelacity','basilan'),('maguindanaodelnorte','maguindanao'),('maguindanaodelsur','maguindanao')]:
         result[child] = result[parent]
     return result
 
@@ -151,16 +150,17 @@ def prepare(elu, rows, download, suggest_field, normalize):
                     data = data[data.intersects(local_mask)].copy()
                     if data.empty:
                         continue
-                    data['geometry'] = data.geometry.intersection(local_mask)
-                    data = normalize(data)
-                    data = data[data.geometry.area > 0].copy()
-                    if data.empty:
-                        continue
                     if target_crs is None:
                         from pyproj import CRS
                         crs = CRS.from_user_input(info['crs'])
                         target_crs = crs if crs.is_projected and all(axis.unit_name.lower() in ('metre','meter') for axis in crs.axis_info) else elu.estimate_utm_crs()
                     data = data.rename(columns={field:role.upper()})[[role.upper(),'geometry']].to_crs(target_crs)
+                    output_mask = gpd.GeoSeries([mask],crs=4326).to_crs(target_crs).iloc[0]
+                    data['geometry'] = data.geometry.intersection(output_mask)
+                    data = normalize(data)
+                    data = data[data.geometry.area > 0].copy()
+                    if data.empty:
+                        continue
                     clips[role].append(data)
                     hit_roles.add(role)
                     sources.append({'island':island,'province':row['province'],'layer':role,'key':row['key'],'features':len(data)})
