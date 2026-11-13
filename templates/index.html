@@ -1,6 +1,6 @@
 <!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>NPAAAD/SAFDZ–CLUP Harmonization</title><link rel="stylesheet" href="/static/style.css"><link rel="stylesheet" href="/static/harmonizer.css?v=2"></head>
+<title>NPAAAD/SAFDZ–CLUP Harmonization</title><link rel="stylesheet" href="/static/style.css"><link rel="stylesheet" href="/static/harmonizer.css?v=3"></head>
 <body class="harmonizer-page"><div class="shell"><aside>
 <div class="agency-brand">
   <div class="agency-logos"><img class="bswm-logo" src="/static/assets/da_bswm_logo.png" alt="DA BSWM logo"><img class="almed-logo" src="/static/assets/almed_logo.png" alt="ALMED logo"></div>
@@ -18,7 +18,11 @@
 <div class="grid">
 <label class="elu-upload"><span class="upload-symbol" aria-hidden="true">↑</span><strong>Existing / Actual Land Use <span class="field-badge">Required</span></strong><span class="upload-description">Choose your ELU Shapefile ZIP</span><input type="file" name="elu_zip" accept=".zip" required><span class="upload-formats">Include .shp, .shx, .dbf, and .prj files</span></label>
 
-<div class="dataset-panel"><div class="dataset-title"><span class="small-icon" aria-hidden="true">▱</span><h3>Choose your reference data</h3><span class="field-badge subtle">NPAAAD + SAFDZ</span></div><p class="hint">Choose a province to load its NPAAAD and SAFDZ datasets automatically, or select manual ZIP upload.</p><div class="dataset-grid"><label>Island Group<select name="r2_island" id="r2_island"><option value="">Manual ZIP upload</option></select></label><label>Province<select name="r2_province" id="r2_province" disabled><option value="">Choose province</option></select></label></div><p id="r2_status" class="hint">Checking R2 datasets…</p><details id="manualR2"><summary>Manual NPAAAD / SAFDZ ZIP upload — both required in manual mode</summary><div class="dataset-grid manual-grid"><label>NPAAAD ZIP<input type="file" name="npaaad_zip" accept=".zip"></label><label>SAFDZ ZIP<input type="file" name="safdz_zip" accept=".zip"></label></div></details></div>
+<div class="dataset-panel"><div class="dataset-title"><span class="small-icon" aria-hidden="true">▱</span><h3>Automatic reference data</h3><span class="field-badge subtle">NPAAAD + SAFDZ</span></div>
+<p class="hint">Upload your ELU. The system detects matching reference datasets and crops both layers to your exact ELU boundary, including areas across provincial borders.</p>
+<input type="hidden" name="reference_mode" id="referenceMode" value="auto"><input type="hidden" name="auto_reference_token" id="autoReferenceToken" value="">
+<div id="autoReferenceStatus" class="reference-detection" role="status" aria-live="polite"><span class="reference-indicator" aria-hidden="true"></span><div><strong id="autoReferenceHeading">Ready to detect your area</strong><p id="autoReferenceText">No island group or province selection is needed.</p></div></div>
+<details id="manualR2"><summary>Advanced · Use your own NPAAAD and SAFDZ files</summary><label class="mapping-review manual-reference-toggle"><input type="checkbox" id="manualReferenceToggle"><span>Use manual reference uploads instead of automatic detection</span></label><div id="manualReferenceFiles" class="dataset-grid manual-grid hidden"><label>NPAAAD ZIP<input type="file" name="npaaad_zip" accept=".zip" disabled></label><label>SAFDZ ZIP<input type="file" name="safdz_zip" accept=".zip" disabled></label></div></details></div>
 </div><details class="optional-layers"><summary>Advanced Options · Optional GIS layers</summary><p class="hint">Add these only when needed for your analysis.</p><div class="grid"><label>Approved / Proposed CLUP (optional)<input type="file" name="clup_zip" accept=".zip"></label><label>Land Cover Map 2025 (optional)<input type="file" name="landcover_zip" accept=".zip"></label>
 <label>Poultry Shapefile (optional)<input type="file" name="poultry_zip" accept=".zip"></label></div></details>
 <div id="inspectMsg" class="inspection-status" role="status" aria-live="polite">Select shapefile ZIPs. Fields and CRS are detected automatically.</div>
@@ -38,7 +42,7 @@
 <div class="output-item"><span class="output-icon">XLS</span><div><h3>Excel summary</h3><p>Area summaries and harmonization tables.</p></div></div>
 <div class="output-item"><span class="output-icon">GIS</span><div><h3>Harmonized layer</h3><p>Union Shapefile for your GIS workspace.</p></div></div>
 <div class="output-item"><span class="output-icon">QA</span><div><h3>Quality report</h3><p>Validation and geometry checks.</p></div></div>
-<div class="help-tip"><span class="tip-heading">A GOOD START</span><p>Choose the province that covers your ELU boundary. Review the classification field before running the analysis.</p></div></div>
+<div class="help-tip"><span class="tip-heading">A GOOD START</span><p>Upload your ELU with its correct coordinate reference system. Reference layers are detected and cropped automatically. Review the classification field before running.</p></div></div>
 <div class="agency-credit"><strong>Built for agricultural land planning</strong><span>Department of Agriculture</span><span>Bureau of Soils and Water Management</span><span>Agricultural Land Management and Evaluation Division</span></div></section></div>
 <footer class="workspace-footer"><span>NPAAAD / SAFDZ — CLUP Harmonizer</span><span>DA · BSWM · ALMED</span></footer></main></div>
-<script src="/static/harmonizer.js?v=1" defer></script></body></html>
+<script src="/static/harmonizer.js?v=3" defer></script></body></html>

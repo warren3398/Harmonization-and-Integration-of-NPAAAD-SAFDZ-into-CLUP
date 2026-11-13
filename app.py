@@ -756,86 +756,100 @@ def r2_download(key,dest):
     client.download_file(bucket,key,str(dest))
     return dest
 
+def r2_dataset_rows():
+    rows=[]
+    client=r2_client()
+    for page in client.get_paginator('list_objects_v2').paginate(Bucket=os.environ.get('R2_BUCKET','npaaad-safdz-data'),Prefix='nationwide/'):
+        for item in page.get('Contents',[]):
+            parts=item['Key'].split('/')
+            if len(parts)==4 and parts[1] in ('luzon','visayas','mindanao') and parts[3] in ('npaaad.gpkg','safdz.gpkg') and item['Size']>0:
+                rows.append({'island':parts[1],'province':parts[2],'layer':parts[3][:-5],'bytes':item['Size']})
+    return rows
+
 @app.route('/api/r2/datasets')
 def list_r2_datasets():
     try:
-        rows=[]
-        client=r2_client()
-        for page in client.get_paginator('list_objects_v2').paginate(Bucket=os.environ.get('R2_BUCKET','npaaad-safdz-data'),Prefix='nationwide/'):
-            for item in page.get('Contents',[]):
-                parts=item['Key'].split('/')
-                if len(parts)==4 and parts[1] in ('luzon','visayas','mindanao') and parts[3] in ('npaaad.gpkg','safdz.gpkg') and item['Size']>0:
-                    rows.append({'island':parts[1],'province':parts[2],'layer':parts[3][:-5],'bytes':item['Size']})
+        rows=r2_dataset_rows()
         return jsonify({'datasets':rows})
     except Exception as e:
         return jsonify({'error':'Unable to list R2 datasets: '+str(e)}),502
 
+def reference_metadata(path, role):
+    import pyogrio
+    info=pyogrio.read_info(path)
+    frame=gpd.read_file(path,rows=1000)
+    fields=[name for name in frame.columns if name!='geometry']
+    suggested=suggest_field(fields,role)
+    return {'filename':path.name,'crs':str(frame.crs),'epsg':frame.crs.to_epsg() if frame.crs else None,
+            'geometry_types':list(frame.geom_type.dropna().astype(str).unique()),
+            'feature_count':int(info.get('features') or len(frame)),'fields':fields,
+            'suggested_field':suggested,'sample_values':field_preview(frame,suggested)}
+
+
 @app.route('/inspect', methods=['POST'])
 def inspect_layers():
-    job = WORK_ROOT / ('inspect_' + next(tempfile._get_candidate_names()))
-    job.mkdir(parents=True, exist_ok=True)
-    roles = [
-        ('elu_zip','elu',False), ('clup_zip','clup',False), ('npaaad_zip','npaaad',False),
-        ('safdz_zip','safdz',False), ('landcover_zip','landcover',False), ('poultry_zip','poultry',False)
-    ]
-    result = {}
+    job=WORK_ROOT/('inspect_'+uuid.uuid4().hex)
+    job.mkdir(parents=True,exist_ok=True)
+    result={}
+    automatic=request.form.get('reference_mode')=='auto'
     try:
-        chosen=r2_selection()
-        for file_key, role, required in roles:
-            up = request.files.get(file_key)
-            if not up or not up.filename:
-                if required:
-                    raise ValueError(f'Missing required upload: {file_key}')
-                continue
-            gdf, meta = inspect_uploaded_shapefile(up, job/role)
-            suggested = suggest_field(meta['fields'], role)
-            meta['suggested_field'] = suggested
-            meta['sample_values'] = field_preview(gdf, suggested)
-            # ELU mapping UI needs the actual unique descriptions. Keep values
-            # for each candidate field so changing the dropdown updates instantly.
-            if role == 'elu':
-                meta['field_values'] = {}
-                for fld in meta['fields']:
-                    vals = gdf[fld].dropna().astype(str).str.strip()
-                    vals = vals[vals != ''].drop_duplicates().sort_values().head(1000).tolist()
-                    meta['field_values'][fld] = vals
-            result[role] = meta
-        if chosen:
-            for role,key in chosen.items():
-                file=r2_download(key,job/(role+'.gpkg'))
-                import pyogrio
-                info=pyogrio.read_info(file)
-                gdf=gpd.read_file(file,rows=1000)
-                fields=[c for c in gdf.columns if c!='geometry']
-                suggested=suggest_field(fields,role)
-                result[role]={'filename':key,'crs':str(gdf.crs),'epsg':gdf.crs.to_epsg() if gdf.crs else None,'authority':str(gdf.crs.to_authority()) if gdf.crs else None,'geometry_types':list(gdf.geom_type.dropna().astype(str).unique()),'feature_count':int(info.get('features') or len(gdf)),'fields':fields,'suggested_field':suggested,'sample_values':field_preview(gdf,suggested)}
-        # NPAAAD + SAFDZ are the authoritative/master CRS. Other layers will
-        # be reprojected to this CRS during processing.
-        np_meta, saf_meta = result.get('npaaad'), result.get('safdz')
-        master_crs = None
-        master_ok = False
-        master_error = None
-        if np_meta and saf_meta:
-            np_crs = gpd.read_file(job/'npaaad.gpkg',rows=1).crs if chosen else gpd.read_file(list((job/'npaaad').rglob('*.shp'))[0],rows=1).crs
-            saf_crs = gpd.read_file(job/'safdz.gpkg',rows=1).crs if chosen else gpd.read_file(list((job/'safdz').rglob('*.shp'))[0],rows=1).crs
+        chosen=None if automatic else r2_selection()
+        elu=None
+        for role in ('elu','clup','npaaad','safdz','landcover','poultry'):
+            if automatic and role in ('npaaad','safdz'): continue
+            upload=request.files.get(role+'_zip')
+            if not upload or not upload.filename: continue
+            frame,meta=inspect_uploaded_shapefile(upload,job/role)
+            suggested=suggest_field(meta['fields'],role)
+            meta['suggested_field']=suggested
+            meta['sample_values']=field_preview(frame,suggested)
+            if role=='elu':
+                elu=frame
+                meta['field_values']={}
+                for field in meta['fields']:
+                    values=frame[field].dropna().astype(str).str.strip()
+                    meta['field_values'][field]=values[values!=''].drop_duplicates().sort_values().head(1000).tolist()
+            result[role]=meta
+        paths={}
+        if automatic:
+            import auto_reference
+            if elu is None: raise ValueError('Upload an Existing / Actual Land Use (ELU) shapefile ZIP.')
+            token=request.form.get('auto_reference_token','')
+            try:
+                if not token: raise ValueError('No previous reference detection.')
+                folder,auto_meta=auto_reference.load(token,elu)
+            except ValueError:
+                folder,auto_meta=auto_reference.prepare(elu,r2_dataset_rows(),r2_download,suggest_field,normalize_polygon_gdf)
+            paths={role:folder/(role+'.gpkg') for role in ('npaaad','safdz')}
+            result['_auto_reference']=auto_meta
+        elif chosen:
+            paths={role:r2_download(key,job/(role+'.gpkg')) for role,key in chosen.items()}
+        else:
+            for role in ('npaaad','safdz'):
+                files=list((job/role).rglob('*.shp'))
+                if files: paths[role]=files[0]
+        for role,path in paths.items():
+            result[role]=reference_metadata(path,role)
+        master_ok=False
+        master_crs=None
+        error=None
+        if all(role in paths for role in ('npaaad','safdz')):
+            np_crs=gpd.read_file(paths['npaaad'],rows=1).crs
+            saf_crs=gpd.read_file(paths['safdz'],rows=1).crs
             if np_crs is None or saf_crs is None:
-                master_error = 'NPAAAD or SAFDZ has a missing/unreadable CRS.'
+                error='NPAAAD or SAFDZ has a missing/unreadable CRS.'
             elif np_crs.equals(saf_crs):
-                master_ok = True
-                auth = np_crs.to_authority()
-                master_crs = ':'.join(map(str, auth)) if auth else np_crs.to_string()
+                master_ok=True
+                auth=np_crs.to_authority()
+                master_crs=':'.join(map(str,auth)) if auth else np_crs.to_string()
             else:
-                master_error = 'NPAAAD and SAFDZ use different CRS. They must match before processing.'
-        result['_crs_summary'] = {
-            'master_ok': master_ok,
-            'master_crs': master_crs,
-            'error': master_error
-        }
+                error='NPAAAD and SAFDZ use different CRS. They must match before processing.'
+        result['_crs_summary']={'master_ok':master_ok,'master_crs':master_crs,'error':error}
         return jsonify(result)
-    except Exception as e:
-        return jsonify({'error': str(e)}), 400
+    except Exception as error:
+        return jsonify({'error':str(error)}),400
     finally:
-        shutil.rmtree(job, ignore_errors=True)
+        shutil.rmtree(job,ignore_errors=True)
 
 
 JOBS = {}
@@ -887,6 +901,8 @@ def run_background(job_id, job, uploads, fields, elu_mapping):
         # v1.8: the former full overlap/duplicate QA scan was the main reason the
         # UI appeared stuck at 5%. Use a fast validity/count QA during the run.
         qa={'ELU_before':fast_qa(elu_raw),'NPAAAD_before':fast_qa(np_raw),'SAFDZ_before':fast_qa(saf_raw)}
+        if '_auto_reference' in uploads:
+            qa['Reference_detection']={key:value for key,value in uploads['_auto_reference'].items() if key not in ('token','boundary_hash')}
         progress(15, 'Preparing layers')
         # v1.9: copy user-selected fields into unique internal names BEFORE any
         # overlay. GeoPandas otherwise suffixes same-named fields (_1/_2), which
@@ -1087,29 +1103,50 @@ def run_background(job_id, job, uploads, fields, elu_mapping):
 
 @app.route('/process_start', methods=['POST'])
 def process_start():
+    job=None
     try:
-        if request.form.get('elu_reviewed') != 'yes':
+        if request.form.get('elu_reviewed')!='yes':
             raise ValueError('Confirm that you reviewed all ELU categories, including Other / Ignore.')
         try:
             elu_mapping=validate_elu_mapping(json.loads(request.form.get('elu_mapping','{}') or '{}'))
-        except (json.JSONDecodeError, TypeError):
+        except (json.JSONDecodeError,TypeError):
             raise ValueError('Invalid ELU mapping. Inspect the files again and review all categories.')
-        chosen=r2_selection()
-        for r in (['elu_zip'] if chosen else ['elu_zip','npaaad_zip','safdz_zip']):
-            if r not in request.files or not request.files[r].filename: raise ValueError(f'Missing required upload: {r}')
-        job_id=uuid.uuid4().hex; job=WORK_ROOT/job_id; up=job/'uploads'; up.mkdir(parents=True)
+        automatic=request.form.get('reference_mode')=='auto'
+        chosen=None if automatic else r2_selection()
+        for role in (['elu_zip'] if automatic or chosen else ['elu_zip','npaaad_zip','safdz_zip']):
+            if role not in request.files or not request.files[role].filename:
+                raise ValueError('Missing required upload: '+role)
+        job_id=uuid.uuid4().hex
+        job=WORK_ROOT/job_id
+        up=job/'uploads'
+        up.mkdir(parents=True)
         uploads={}
         for name in ['elu_zip','npaaad_zip','safdz_zip','landcover_zip','clup_zip','poultry_zip']:
-            f=request.files.get(name)
-            if f and f.filename:
-                path=up/(name+'.zip'); f.save(path); uploads[name]=path
-        if chosen:
+            if automatic and name in ('npaaad_zip','safdz_zip'): continue
+            upload=request.files.get(name)
+            if upload and upload.filename:
+                path=up/(name+'.zip')
+                upload.save(path)
+                uploads[name]=path
+        if automatic:
+            import auto_reference
+            elu=gpd.read_file(extract_zip_path(uploads['elu_zip'],job/'elu_validate'))
+            folder,meta=auto_reference.load(request.form.get('auto_reference_token'),elu)
+            for role in ('npaaad','safdz'):
+                path=up/(role+'.gpkg')
+                shutil.copyfile(folder/(role+'.gpkg'),path)
+                uploads[role+'_gpkg']=path
+            uploads['_auto_reference']=meta
+        elif chosen:
             for role,key in chosen.items(): uploads[role+'_gpkg']=r2_download(key,up/(role+'.gpkg'))
-        fields={'elu':request.form.get('elu_field','ELU').strip(),'clup':request.form.get('clup_field','CLUP').strip(),'npaaad':request.form.get('npaaad_field','NPAAAD').strip(),'safdz':request.form.get('safdz_field','SAFDZ').strip(),'landcover':request.form.get('landcover_field','CLASS').strip()}
+        fields={role:request.form.get(role+'_field',default).strip() for role,default in
+                [('elu','ELU'),('clup','CLUP'),('npaaad','NPAAAD'),('safdz','SAFDZ'),('landcover','CLASS')]}
         set_job(job_id,status='queued',percent=0,step='Preparing data',elapsed=0)
         threading.Thread(target=run_background,args=(job_id,job,uploads,fields,elu_mapping),daemon=True).start()
         return jsonify({'job_id':job_id})
-    except Exception as e: return jsonify({'error':str(e)}),400
+    except Exception as error:
+        if job: shutil.rmtree(job,ignore_errors=True)
+        return jsonify({'error':str(error)}),400
 
 @app.route('/progress/<job_id>')
 def job_progress(job_id):

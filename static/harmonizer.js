@@ -1,22 +1,25 @@
 'use strict';
 (() => {
  const $=id=>document.getElementById(id),form=$('mainForm'),run=$('runBtn'),msg=$('inspectMsg'),mapping=$('mapping'),cards=$('layerCards');
- const island=$('r2_island'),province=$('r2_province'),manual=$('manualR2');
+ const mode=$('referenceMode'),token=$('autoReferenceToken'),manualToggle=$('manualReferenceToggle');
  const file=name=>form.elements.namedItem(name),hasFile=name=>!!file(name)?.files?.length;
  const labels={elu:'Existing / Actual Land Use (ELU)',clup:'Approved / Proposed CLUP',npaaad:'NPAAAD',safdz:'SAFDZ',landcover:'Land Cover Map 2025'};
  const steps=['Upload Data','Field Mapping','Validate & Clean','Reproject & Dissolve','Clip & Union','Compute & Export'];
- let datasets=[],inspection=null,inspected=false,busy=false,sequence=0,debounce=null,controller=null,eluMap=Object.create(null);
+ let inspection=null,inspected=false,busy=false,sequence=0,debounce=null,controller=null,eluMap=Object.create(null);
  const esc=value=>String(value??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
  function notice(text,state='info'){msg.textContent=text;msg.dataset.state=state;}
  function setStep(index,complete=false){
   $('workflowStatus').textContent=complete?'Complete · Results ready':`Step ${index+1} of 6 · ${steps[index]}`;
   document.querySelectorAll('.steps li').forEach((el,i)=>{el.classList.toggle('active',!complete&&i===index);el.classList.toggle('done',complete||i<index);if(i===index&&!complete)el.setAttribute('aria-current','step');else el.removeAttribute('aria-current');});
  }
- function sourceReady(){return !!(island.value&&province.value)||(!island.value&&hasFile('npaaad_zip')&&hasFile('safdz_zip'));}
+ function showReference(heading,text,state='idle'){
+  $('autoReferenceHeading').textContent=heading;$('autoReferenceText').textContent=text;$('autoReferenceStatus').dataset.state=state;
+ }
+ function sourceReady(){return mode.value==='auto'||(hasFile('npaaad_zip')&&hasFile('safdz_zip'));}
  function fieldsReady(){return ['elu','npaaad','safdz',...['clup','landcover'].filter(role=>hasFile(role+'_zip'))].every(role=>!!file(role+'_field')?.value);}
  function pendingCount(){return Object.values(eluMap).filter(value=>!value).length;}
  function reviewReady(){return Object.keys(eluMap).length>0&&!pendingCount()&&!!$('eluReviewed')?.checked;}
- function ready(){return inspected&&hasFile('elu_zip')&&sourceReady()&&inspection?._crs_summary?.master_ok&&fieldsReady()&&reviewReady();}
+ function ready(){return inspected&&hasFile('elu_zip')&&sourceReady()&&(mode.value!=='auto'||!!token.value)&&inspection?._crs_summary?.master_ok&&fieldsReady()&&reviewReady();}
  function refresh(){
   run.disabled=busy||!ready();
   $('runHint').textContent=busy?'Processing your selected files. Inputs are locked until this job finishes.':run.disabled?'Complete uploads, select classification fields, and review every ELU description.':'Ready to generate the Excel summary, GIS layer, and QA/QC report.';
@@ -51,8 +54,9 @@
  function inspectNow(){
   if(busy)return;invalidate();
   if(!hasFile('elu_zip')){notice('Upload the required ELU shapefile ZIP to continue.');return;}
-  if(!sourceReady()){notice(island.value?'Choose a province with both NPAAAD and SAFDZ datasets.':'Manual mode: upload both NPAAAD and SAFDZ shapefile ZIPs.','warning');return;}
-  notice('Checking uploaded files and coordinate systems…');
+  if(!sourceReady()){notice('Manual mode: upload both NPAAAD and SAFDZ shapefile ZIPs.','warning');return;}
+  if(mode.value==='auto')showReference('Detecting and cropping reference data…','Matching the ELU location and clipping NPAAAD / SAFDZ. Larger areas may take longer.','loading');
+  notice(mode.value==='auto'?'Detecting NPAAAD / SAFDZ and cropping to your ELU boundary…':'Checking uploaded files and coordinate systems…');
   const current=sequence;debounce=setTimeout(()=>inspect(current),500);
  }
  async function readJSON(response,fallback){
@@ -65,6 +69,15 @@
    const data=await readJSON(await fetch('/inspect',{method:'POST',body:new FormData(form),signal:controller.signal}),'Unable to inspect the files. The service may have restarted; please retry.');
    if(current!==sequence)return;
    inspection=data;inspected=true;cards.replaceChildren();const crs=data._crs_summary||{};
+   if(mode.value==='auto'){
+    const detected=data._auto_reference;
+    if(!detected?.token)throw Error('Automatic reference detection did not complete. Upload the ELU again.');
+    token.value=detected.token;
+    const names=[...new Set((detected.sources||[]).map(row=>row.province.replaceAll('-',' ')))];
+    const coverage=detected.coverage_percent||{};
+    const suffix=Object.entries(coverage).map(([role,value])=>role.toUpperCase()+': '+value+'% of ELU covered').join(' · ');
+    showReference('NPAAAD + SAFDZ cropped to your ELU',names.map(name=>name.toUpperCase()).join(', ')+(suffix?' · '+suffix:''),'ready');
+   }
    $('crsBanner').className='crs-banner '+(crs.master_ok?'ok':'warn');
    $('crsBanner').textContent=crs.master_ok?`Final CRS: ${crs.master_crs}. Other layers will be reprojected to match NPAAAD / SAFDZ.`:(crs.error||'NPAAAD and SAFDZ must have matching, readable coordinate systems.');
    for(const [role,label] of Object.entries(labels)){
@@ -83,30 +96,24 @@
    });}
    if(!crs.master_ok)notice(crs.error||'Upload NPAAAD and SAFDZ with matching coordinate systems.','error');
    refresh();
-  }catch(error){if(current!==sequence||error.name==='AbortError')return;inspected=false;mapping.classList.add('hidden');notice(error.message,'error');refresh();}
+  }catch(error){if(current!==sequence||error.name==='AbortError')return;inspected=false;mapping.classList.add('hidden');notice(error.message,'error');if(mode.value==='auto')showReference('Reference detection needs attention',error.message,'error');refresh();}
  }
  function syncSources(){
-  const automatic=!!island.value,chosen=automatic&&!!province.value;
-  province.disabled=!automatic;
-  manual.open=!automatic;
-  for(const name of ['npaaad_zip','safdz_zip']){file(name).required=!automatic;file(name).disabled=automatic;}
-  $('r2_status').textContent=chosen?'NPAAAD and SAFDZ datasets available for '+province.selectedOptions[0].textContent+'.':automatic?'Choose a province. Only provinces with both datasets are listed.':'Manual mode: NPAAAD ZIP and SAFDZ ZIP are both required.';
+  const manual=manualToggle.checked;
+  mode.value=manual?'manual':'auto';token.value='';
+  $('manualReferenceFiles').classList.toggle('hidden',!manual);
+  for(const name of ['npaaad_zip','safdz_zip']){file(name).required=manual;file(name).disabled=!manual;}
+  $('autoReferenceStatus').classList.toggle('hidden',manual);
+  showReference('Ready to detect your area','No island group or province selection is needed.');
   inspectNow();
  }
- island.addEventListener('change',()=>{
-  province.innerHTML='<option value="">Choose province</option>';
-  for(const name of [...new Set(datasets.filter(row=>row.island===island.value).map(row=>row.province))].sort()){
-   const layers=datasets.filter(row=>row.island===island.value&&row.province===name).map(row=>row.layer);
-   if(layers.includes('npaaad')&&layers.includes('safdz'))province.add(new Option(name.replaceAll('-',' ').toUpperCase(),name));
+ manualToggle.addEventListener('change',syncSources);
+ form.addEventListener('change',event=>{
+  if(event.target.type==='file'){
+   if(event.target.name==='elu_zip'){token.value='';showReference('Ready to detect your area','The new ELU will be used to detect and crop reference data.');}
+   inspectNow();
   }
-  syncSources();
  });
- province.addEventListener('change',syncSources);
- form.addEventListener('change',event=>{if(event.target.type==='file')inspectNow();});
- fetch('/api/r2/datasets').then(r=>readJSON(r,'Automatic datasets are unavailable.')).then(data=>{
-  if(data.error)throw Error(data.error);datasets=data.datasets||[];
-  for(const name of [...new Set(datasets.map(row=>row.island))].sort())island.add(new Option(name.toUpperCase(),name));
- }).catch(error=>{$('r2_status').textContent=error.message+' You can use manual uploads instead.';});
  function lockInputs(locked){
   for(const el of form.querySelectorAll('input,select')){
    if(locked){el.dataset.preJobDisabled=String(el.disabled);el.disabled=true;}
