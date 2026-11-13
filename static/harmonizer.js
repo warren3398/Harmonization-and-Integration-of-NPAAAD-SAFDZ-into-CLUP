@@ -64,6 +64,13 @@
   let data;try{data=JSON.parse(await response.text());}catch{throw Error(fallback);}
   if(!response.ok)throw Error(data.error||fallback);return data;
  }
+ function waitForServer(current){
+  debounce=setTimeout(async()=>{
+   if(current!==sequence)return;
+   try{const response=await fetch('/api/gis-status',{cache:'no-store'});const state=await response.json();if(current!==sequence)return;if(response.ok&&!state.busy){inspect(current);return;}}catch{}
+   if(current===sequence)waitForServer(current);
+  },2500);
+ }
  async function inspect(current){
   controller=new AbortController();
   try{
@@ -98,7 +105,7 @@
    if(data._elu_cleanup?.requires_review){showReference('Waiting for ELU geometry review','Resolve class conflicts or missing classifications before reference detection.','error');$('eluQualityPanel').open=true;}
    if(!crs.master_ok)notice(crs.error||'Upload NPAAAD and SAFDZ with matching coordinate systems.','error');
    refresh();
-  }catch(error){if(current!==sequence||error.name==='AbortError')return;if(mode.value==='auto'&&error.message.includes('Another ELU reference detection')){notice('Waiting for reference detection to finish…');showReference('Preparing reference data…','Another detection is finishing. This upload will retry automatically.','loading');debounce=setTimeout(()=>inspect(current),2500);return;}inspected=false;mapping.classList.add('hidden');notice(error.message,'error');if(mode.value==='auto')showReference('Reference detection needs attention',error.message,'error');refresh();}
+  }catch(error){if(current!==sequence||error.name==='AbortError')return;if(mode.value==='auto'&&error.message.includes('Another ELU reference detection')){notice('Waiting for the active GIS operation to finish…');showReference('Preparing reference data…','Another GIS operation is running. This upload will retry automatically.','loading');waitForServer(current);return;}inspected=false;mapping.classList.add('hidden');notice(error.message,'error');if(mode.value==='auto')showReference('Reference detection needs attention',error.message,'error');refresh();}
  }
  function syncSources(){
   const manual=manualToggle.checked;

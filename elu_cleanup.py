@@ -3,7 +3,7 @@ import math
 import geopandas as gpd
 import pandas as pd
 from pyproj import CRS
-from shapely import make_valid
+from shapely import make_valid, prepare
 from shapely.geometry import Polygon, MultiPolygon, GeometryCollection
 from shapely.ops import unary_union
 
@@ -113,15 +113,28 @@ def clean(frame, field, settings):
     # authoritative outside boundary. Never invent a convex hull for gap filling.
     footprint = unary_union(list(classes.values()))
     holes = []
-    for part in ([footprint] if isinstance(footprint,Polygon) else footprint.geoms):
+    parts = [footprint] if isinstance(footprint,Polygon) else list(footprint.geoms)
+    part_index = gpd.GeoSeries(parts,crs=metric_crs).sindex
+    for owner,part in enumerate(parts):
         for ring in part.interiors:
-            gap = polygonal(Polygon(ring).difference(footprint))
-            if gap is None:
-                continue
+            gap = Polygon(ring)
+            # Only nested island components can occupy an interior ring. Avoid
+            # subtracting the entire, often very complex, ELU for every hole.
+            islands=[parts[int(index)] for index in part_index.query(gap,predicate='intersects') if int(index)!=owner]
+            if islands:gap=polygonal(gap.difference(unary_union(islands)))
+            if gap is None:continue
             holes.extend([gap] if isinstance(gap,Polygon) else gap.geoms)
+    adjacent_names=list(classes)
+    adjacent_geometries=gpd.GeoSeries(list(classes.values()),crs=metric_crs)
+    adjacent_index=adjacent_geometries.sindex
+    boundaries={name:geometry.boundary for name,geometry in classes.items()}
+    for geometry in adjacent_geometries:prepare(geometry)
     gap_rows = []
     for gap in holes:
-        neighbors=[name for name,geometry in classes.items() if gap.boundary.intersection(geometry.boundary).length > 1e-6]
+        edge=gap.boundary
+        candidates=adjacent_index.query(gap,predicate='intersects')
+        owners=[adjacent_names[int(index)] for index in candidates if adjacent_geometries.iloc[int(index)].covers(edge)] if not overlaps or report['overlaps_resolved'] else []
+        neighbors=owners[:1] if owners else [adjacent_names[int(index)] for index in candidates if edge.intersection(boundaries[adjacent_names[int(index)]]).length > 1e-6]
         eligible = gap.area <= settings['gap_max_m2'] and len(neighbors)==1
         filled = settings['fill_gaps'] and eligible and (not overlaps or report['overlaps_resolved']) and not report['missing_class_features']
         if filled:
@@ -164,8 +177,15 @@ def save_review(cleaned, report, issues):
                 shutil.rmtree(folder,ignore_errors=True)
         except FileNotFoundError:
             pass
-    token=uuid.uuid4().hex
-    folder=root/token;folder.mkdir()
+    import hashlib
+    key=hashlib.sha256(json.dumps(report,sort_keys=True).encode())
+    for geometry in cleaned.geometry:key.update(geometry.wkb)
+    token=key.hexdigest()[:32]
+    folder=root/token
+    if (folder/'ELU_GEOMETRY_REVIEW.zip').is_file():return token
+    folder.mkdir(exist_ok=True)
+    from runtime_limits import ensure_space
+    ensure_space()
     gpkg=folder/'ELU_GEOMETRY_REVIEW.gpkg'
     write_review(gpkg,cleaned,issues)
     bundle=folder/'ELU_GEOMETRY_REVIEW.zip'

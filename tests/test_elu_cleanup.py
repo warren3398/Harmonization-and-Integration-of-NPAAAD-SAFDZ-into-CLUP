@@ -112,3 +112,12 @@ def test_change_confirmation_is_enforced_on_server(tmp_path,monkeypatch):
     response=module.app.test_client().post('/process_start',data={'reference_mode':'auto','elu_zip':(io.BytesIO(raw),'elu.zip'),
        'elu_reviewed':'yes','elu_field':'LAND_USE','elu_mapping':json.dumps({'AGR':'AGR'}),'elu_fill_gaps':'yes','elu_gap_max_m2':'10'})
     assert response.status_code==400 and 'Confirm the gap filling' in response.json['error']
+
+
+def test_gap_with_nested_different_class_island_is_not_filled():
+ outer=box(0,0,10,10);hole=box(3,3,7,7);island=box(4,4,6,6)
+ data=frame(['AGR','Forest'],[Polygon(outer.exterior.coords,[hole.exterior.coords]),island])
+ cleaned,report,issues=elu_cleanup.clean(data,'LAND_USE',settings(fill_gaps=True,gap_max_m2=100))
+ assert report['enclosed_gaps_detected']==1 and report['gaps_filled']==0
+ assert report['gap_area_detected_m2']==12
+ assert cleaned.geometry.area.sum()==88

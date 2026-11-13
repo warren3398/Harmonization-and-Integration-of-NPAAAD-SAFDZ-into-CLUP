@@ -107,6 +107,14 @@ def prepare(elu, rows, download, suggest_field, normalize):
     try:
         clean_expired()
         mask = boundary(elu)
+        boundary_hash=hashlib.sha256(shapely.normalize(mask).wkb).hexdigest()
+        # Reuploads and an expired browser handle can reuse an identical crop.
+        for cached in ROOT.iterdir():
+            try:
+                meta=json.loads((cached/'metadata.json').read_text())
+                if meta['boundary_hash']==boundary_hash and time.time()-meta['created']<TTL and all((cached/(role+'.gpkg')).is_file() for role in ('npaaad','safdz')):
+                    return cached,meta
+            except (OSError,ValueError,KeyError):pass
         masks = regions()
         pairs = {}
         for row in rows:
@@ -124,7 +132,8 @@ def prepare(elu, rows, download, suggest_field, normalize):
         token = uuid.uuid4().hex
         folder = ROOT / token
         folder.mkdir()
-        clips = {'npaaad':[], 'safdz':[]}
+        counts = {'npaaad':0, 'safdz':0}
+        coverage_geometries = {'npaaad':None, 'safdz':None}
         sources = []
         target_crs = None
         for (island,province),layers in sorted(candidates):
@@ -143,46 +152,51 @@ def prepare(elu, rows, download, suggest_field, normalize):
                     field = suggest_field(list(info['fields']), role)
                     if not field:
                         raise ValueError(f"{row['province']} {role.upper()} has no classification field.")
-                    data = gpd.read_file(local, bbox=local_mask.bounds, columns=[field])
-                    if data.empty:
-                        continue
-                    data = normalize(data)
-                    data = data[data.intersects(local_mask)].copy()
-                    if data.empty:
-                        continue
-                    if target_crs is None:
-                        from pyproj import CRS
-                        crs = CRS.from_user_input(info['crs'])
-                        target_crs = crs if crs.is_projected and all(axis.unit_name.lower() in ('metre','meter') for axis in crs.axis_info) else elu.estimate_utm_crs()
-                    data = data.rename(columns={field:role.upper()})[[role.upper(),'geometry']].to_crs(target_crs)
-                    output_mask = gpd.GeoSeries([mask],crs=4326).to_crs(target_crs).iloc[0]
-                    data['geometry'] = data.geometry.intersection(output_mask)
-                    data = normalize(data)
-                    data = data[data.geometry.area > 0].copy()
-                    if data.empty:
-                        continue
-                    clips[role].append(data)
-                    hit_roles.add(role)
-                    sources.append({'island':island,'province':row['province'],'layer':role,'key':row['key'],'features':len(data)})
+                    offset=0
+                    feature_count=0
+                    while True:
+                        data=pyogrio.read_dataframe(local,bbox=local_mask.bounds,columns=[field],skip_features=offset,max_features=128)
+                        if data.empty:break
+                        offset+=len(data)
+                        data['geometry']=shapely.make_valid(data.geometry.array)
+                        data=data[data.geometry.notna() & ~data.geometry.is_empty]
+                        data=data[data.intersects(local_mask)].copy()
+                        if data.empty:continue
+                        if target_crs is None:
+                            from pyproj import CRS
+                            crs=CRS.from_user_input(info['crs'])
+                            target_crs=crs if crs.is_projected and all(axis.unit_name.lower() in ('metre','meter') for axis in crs.axis_info) else elu.estimate_utm_crs()
+                        data=data.rename(columns={field:role.upper()})[[role.upper(),'geometry']].to_crs(target_crs)
+                        data[role.upper()]=data[role.upper()].fillna('').astype(str).str.strip()
+                        output_mask=gpd.GeoSeries([mask],crs=4326).to_crs(target_crs).iloc[0]
+                        data['geometry']=data.geometry.intersection(output_mask)
+                        data=normalize(data)
+                        data=data[data.geometry.area>0].copy()
+                        if data.empty:continue
+                        import runtime_limits
+                        runtime_limits.ensure_space()
+                        output=folder/(role+'.gpkg')
+                        data.to_file(output,driver='GPKG',index=False,mode='a' if output.exists() else 'w')
+                        merged=unary_union(data.geometry)
+                        previous=coverage_geometries[role]
+                        coverage_geometries[role]=merged if previous is None else previous.union(merged)
+                        counts[role]+=len(data)
+                        feature_count+=len(data)
+                        del data
+                    if feature_count:
+                        hit_roles.add(role)
+                        sources.append({'island':island,'province':row['province'],'layer':role,'key':row['key'],'features':feature_count})
                 finally:
                     local.unlink(missing_ok=True)
             if hit_roles and set(layers) != {'npaaad','safdz'}:
                 raise ValueError(f'{province}: both NPAAAD and SAFDZ sources are required; one source is unavailable.')
         coverage = {}
-        for role,frames in clips.items():
-            if not frames:
+        output_mask=gpd.GeoSeries([mask],crs=4326).to_crs(target_crs).iloc[0] if target_crs else None
+        for role,count in counts.items():
+            if not count:
                 raise ValueError(f'No {role.upper()} polygons intersect the ELU. Check source coverage and the ELU CRS.')
-            data = gpd.GeoDataFrame(pd.concat(frames, ignore_index=True), crs=target_crs)
-            keep = ~pd.DataFrame({'class':data[role.upper()].astype(str), 'wkb':data.geometry.to_wkb()}).duplicated()
-            data = data.loc[keep].copy()
-            # Final intersection in the output CRS prevents reprojection artifacts
-            # from leaving tiny output slivers outside the uploaded ELU.
-            output_mask = gpd.GeoSeries([mask],crs=4326).to_crs(target_crs).iloc[0]
-            data['geometry'] = data.geometry.intersection(output_mask)
-            data = normalize(data)
-            coverage[role] = round(min(100.0, 100.0*unary_union(data.geometry).area/output_mask.area),2)
-            data.to_file(folder / (role+'.gpkg'),driver='GPKG',index=False)
-        meta = {'token':token,'created':time.time(),'expires_in':TTL,'boundary_hash':fingerprint(elu),
+            coverage[role]=round(min(100.0,100.0*coverage_geometries[role].area/output_mask.area),2)
+        meta = {'token':token,'created':time.time(),'expires_in':TTL,'boundary_hash':boundary_hash,
                 'sources':sources,'crs':str(target_crs),'cropped_to_elu':True,'coverage_percent':coverage}
         (folder / 'metadata.json').write_text(json.dumps(meta))
         return folder, meta
@@ -192,3 +206,4 @@ def prepare(elu, rows, download, suggest_field, normalize):
         raise
     finally:
         LOCK.release()
+

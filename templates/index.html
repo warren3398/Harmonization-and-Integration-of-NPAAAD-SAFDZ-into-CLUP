@@ -16,7 +16,7 @@
 <div id="workflowStatus" class="workflow-status" role="status" aria-live="polite">Step 1 of 6 · Upload Data</div><div class="workspace-layout"><form id="mainForm" action="/process_start" method="post" enctype="multipart/form-data" class="card">
 <div class="section-heading"><span class="section-number">01</span><div><h2>Upload your GIS layers</h2><p class="hint">Start with your existing land use data.</p></div><span class="required-note">* Required</span></div>
 <div class="grid">
-<label class="elu-upload"><span class="upload-symbol" aria-hidden="true">↑</span><strong>Existing / Actual Land Use <span class="field-badge">Required</span></strong><span class="upload-description">Choose your ELU Shapefile ZIP</span><input type="file" name="elu_zip" accept=".zip" required><span class="upload-formats">Include .shp, .shx, .dbf, and .prj files</span></label>
+<label class="elu-upload"><span class="upload-symbol" aria-hidden="true">↑</span><strong>Existing / Actual Land Use <span class="field-badge">Required</span></strong><span class="upload-description">Choose your ELU Shapefile ZIP</span><input type="file" name="elu_zip" accept=".zip" required><span class="upload-formats">Include .shp, .shx, .dbf, and .prj files. Total upload limit: 256 MB.</span></label>
 
 <div class="dataset-panel"><div class="dataset-title"><span class="small-icon" aria-hidden="true">▱</span><h3>Automatic reference data</h3><span class="field-badge subtle">NPAAAD + SAFDZ</span></div>
 <p class="hint">Upload your ELU. The system detects matching reference datasets and crops both layers to your exact ELU boundary, including areas across provincial borders.</p>

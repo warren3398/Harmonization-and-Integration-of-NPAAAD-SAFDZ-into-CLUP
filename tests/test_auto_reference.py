@@ -54,7 +54,10 @@ def setup(tmp_path, monkeypatch):
     content=io.BytesIO()
     with zipfile.ZipFile(content,'w') as archive:
         for path in folder.iterdir(): archive.write(path,path.name)
-    return {'elu':elu,'raw':content.getvalue(),'rows':rows,'download':download,'fetched':fetched,'root':tmp_path}
+    yield {'elu':elu,'raw':content.getvalue(),'rows':rows,'download':download,'fetched':fetched,'root':tmp_path}
+    import runtime_limits
+    assert runtime_limits.GIS_LOCK.acquire(timeout=10)
+    runtime_limits.GIS_LOCK.release()
 
 
 def upload(raw):
@@ -117,6 +120,7 @@ def test_inspect_reuse_and_real_job(setup):
     again=client.post('/inspect',data={'reference_mode':'auto','auto_reference_token':token,'elu_zip':upload(setup['raw'])})
     assert again.status_code==200,again.json
     assert again.json['_auto_reference']['token']==token
+    assert again.json['_elu_cleanup']['review_url']==data['_elu_cleanup']['review_url']
     assert len(setup['fetched'])==fetched
     response=client.post('/process_start',data={
         'reference_mode':'auto','auto_reference_token':token,'elu_zip':upload(setup['raw']),
@@ -129,6 +133,11 @@ def test_inspect_reuse_and_real_job(setup):
         time.sleep(.1)
     assert progress['status']=='complete',progress
     assert len(setup['fetched'])==fetched, 'Generation must reuse prepared crops.'
+    import runtime_limits
+    assert runtime_limits.GIS_LOCK.acquire(timeout=10)
+    runtime_limits.GIS_LOCK.release()
+    remaining={str(path.relative_to(module.WORK_ROOT/response.json['job_id'])) for path in (module.WORK_ROOT/response.json['job_id']).rglob('*') if path.is_file()}
+    assert remaining=={'job_status.json','outputs/HARMONIZATION_RESULTS.zip'}
     bundle=client.get('/download/'+response.json['job_id'])
     assert bundle.status_code==200
     with zipfile.ZipFile(io.BytesIO(bundle.data)) as archive:
@@ -255,3 +264,27 @@ def test_gap_filling_refreshes_reference_crop_and_exports_report(setup):
         report=json.loads(archive.read('ELU_CLEANUP_REPORT.json'))
         assert report['gaps_filled']==1
         assert report['gap_area_filled_m2']==pytest.approx(4,abs=.001)
+
+
+def test_reference_reads_are_bounded_and_append_all_batches(setup,monkeypatch):
+ data=gpd.GeoDataFrame({'CLASS':['A' if i%2==0 else 'BU' for i in range(330)]},geometry=[box(500000+i,1500000,500001+i,1500010) for i in range(330)],crs=32651)
+ files={}
+ for role in ('npaaad','safdz'):
+  path=setup['root']/(role+'-batch.gpkg');data.to_file(path,index=False);files[role]=path
+ elu=gpd.GeoDataFrame({'LAND_USE':['Agriculture']},geometry=[box(500000,1500000,500330,1500010)],crs=32651)
+ monkeypatch.setattr(auto_reference,'regions',lambda:{'alpha':auto_reference.boundary(elu).buffer(.01)})
+ def download(key,destination):shutil.copyfile(files[key.rsplit('/',1)[-1][:-5]],destination);return destination
+ original=auto_reference.pyogrio.read_dataframe;batches=[]
+ def read(*args,**kwargs):
+  if kwargs.get('max_features')==128:batches.append(kwargs['skip_features'])
+  return original(*args,**kwargs)
+ monkeypatch.setattr(auto_reference.pyogrio,'read_dataframe',read)
+ rows=[row for row in setup['rows'] if row['province']=='alpha']
+ folder,meta=auto_reference.prepare(elu,rows,download,module.suggest_field,module.normalize_polygon_gdf)
+ assert 128 in batches and 256 in batches
+ for role in ('npaaad','safdz'):
+  result=gpd.read_file(folder/(role+'.gpkg'));assert len(result)==330
+  assert set(result[role.upper()])=={'A','BU'}
+ fetched_before=len(setup['fetched'])
+ cached,again=auto_reference.prepare(elu,rows,lambda *args:(_ for _ in ()).throw(AssertionError('Should reuse existing crop')),module.suggest_field,module.normalize_polygon_gdf)
+ assert cached==folder and again['token']==meta['token']

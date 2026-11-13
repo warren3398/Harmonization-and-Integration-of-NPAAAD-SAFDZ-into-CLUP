@@ -17,6 +17,8 @@ from werkzeug.security import check_password_hash
 import boto3
 from botocore.config import Config
 
+import runtime_limits
+
 app = Flask(__name__)
 app.secret_key = os.environ.get('ALRMS_SESSION_SECRET', os.urandom(32))
 app.config.update(SESSION_COOKIE_HTTPONLY=True, SESSION_COOKIE_SAMESITE='Lax')
@@ -44,10 +46,16 @@ def no_cache(response):
     response.headers['Expires'] = '0'
     return response
 
-app.config['MAX_CONTENT_LENGTH'] = 1024 * 1024 * 1024
+app.config['MAX_CONTENT_LENGTH'] = 256 * 1024 * 1024
+
+@app.errorhandler(413)
+def upload_too_large(error):
+    return jsonify({'error':'Upload exceeds the 256 MB request limit. Split the ELU into smaller areas or simplify the source files.'}),413
 
 WORK_ROOT = Path(tempfile.gettempdir()) / 'npaaad_clup_harmonizer'
 WORK_ROOT.mkdir(exist_ok=True)
+# Recover scratch files left by a killed worker before accepting new GIS work.
+runtime_limits.cleanup()
 
 SAFDZ_ORDER = ['1','2','3','4','5','6','7','8','9','10','BU','WB','Others']
 NPAAAD_ORDER = ['A','B','C','D','E','F','G','H','BU','WB','Others']
@@ -72,32 +80,29 @@ NPAAAD_DESC = {
 
 def extract_shapefile_zip(upload, dest: Path):
     dest.mkdir(parents=True, exist_ok=True)
-    zpath = dest / upload.filename
+    zpath = dest / 'upload.zip'
     upload.save(zpath)
     with zipfile.ZipFile(zpath, 'r') as z:
-        z.extractall(dest)
+        runtime_limits.extract_checked(z,dest)
     shp_files = list(dest.rglob('*.shp'))
     if not shp_files:
         raise ValueError(f'No .shp found in {upload.filename}')
     return shp_files[0]
 
 
-def inspect_uploaded_shapefile(upload, dest: Path):
-    """Save a ZIP upload and return metadata used by the field-mapping UI."""
-    shp = extract_shapefile_zip(upload, dest)
-    gdf = gpd.read_file(shp)
-    fields = [c for c in gdf.columns if c != 'geometry']
-    crs_text = str(gdf.crs) if gdf.crs is not None else None
-    epsg = gdf.crs.to_epsg() if gdf.crs is not None else None
-    return gdf, {
-        'filename': upload.filename,
-        'crs': crs_text,
-        'epsg': epsg,
-        'authority': (':'.join(map(str, gdf.crs.to_authority())) if gdf.crs is not None and gdf.crs.to_authority() else None),
-        'geometry_types': sorted([str(x) for x in gdf.geom_type.dropna().unique()]),
-        'feature_count': int(len(gdf)),
-        'fields': fields,
-    }
+def inspect_uploaded_shapefile(upload, dest: Path, role='elu', selected=None):
+    """Inspect metadata and only the chosen class, not every attribute column."""
+    import pyogrio
+    shp=extract_shapefile_zip(upload,dest)
+    info=pyogrio.read_info(shp)
+    fields=list(info['fields'])
+    chosen=selected if selected in fields else suggest_field(fields,role)
+    gdf=gpd.read_file(shp,columns=[chosen] if chosen else [],**({'rows':1} if role=='poultry' else {}))
+    return gdf,{'filename':upload.filename,'crs':str(gdf.crs) if gdf.crs else None,
+                'epsg':gdf.crs.to_epsg() if gdf.crs else None,
+                'authority':(':'.join(map(str,gdf.crs.to_authority())) if gdf.crs and gdf.crs.to_authority() else None),
+                'geometry_types':sorted(str(value) for value in gdf.geom_type.dropna().unique()),
+                'feature_count':int(info['features']),'fields':fields}
 
 
 def field_preview(gdf, field, limit=12):
@@ -725,6 +730,11 @@ def eo79_module():
     return Response(page, mimetype='text/html')
 
 
+@app.get('/api/gis-status')
+def gis_operation_status():
+    return jsonify({'busy':runtime_limits.GIS_LOCK.locked()})
+
+
 @app.route('/health')
 def health():
     return jsonify({'status': 'ok', 'app': 'NPAAAD/SAFDZ CLUP Harmonizer', 'version': '2.7'})
@@ -753,7 +763,9 @@ def r2_download(key,dest):
     bucket=os.environ.get('R2_BUCKET','npaaad-safdz-data')
     obj=client.head_object(Bucket=bucket,Key=key)
     if obj['ContentLength']>500*1024*1024: raise ValueError('Selected GeoPackage exceeds 500 MB')
-    client.download_file(bucket,key,str(dest))
+    from boto3.s3.transfer import TransferConfig
+    runtime_limits.ensure_space(int(obj['ContentLength']))
+    client.download_file(bucket,key,str(dest),Config=TransferConfig(max_concurrency=1,use_threads=False))
     return dest
 
 def r2_dataset_rows():
@@ -787,6 +799,7 @@ def reference_metadata(path, role):
 
 
 @app.route('/inspect', methods=['POST'])
+@runtime_limits.inspect_guard
 def inspect_layers():
     job=WORK_ROOT/('inspect_'+uuid.uuid4().hex)
     job.mkdir(parents=True,exist_ok=True)
@@ -799,7 +812,7 @@ def inspect_layers():
             if automatic and role in ('npaaad','safdz'): continue
             upload=request.files.get(role+'_zip')
             if not upload or not upload.filename: continue
-            frame,meta=inspect_uploaded_shapefile(upload,job/role)
+            frame,meta=inspect_uploaded_shapefile(upload,job/role,role,request.form.get('elu_cleanup_field') if role=='elu' else None)
             suggested=suggest_field(meta['fields'],role)
             if role=='elu' and request.form.get('elu_cleanup_field') in meta['fields']:
                 suggested=request.form['elu_cleanup_field']
@@ -811,7 +824,7 @@ def inspect_layers():
                 review_token=elu_cleanup.save_review(elu,cleanup_report,cleanup_issues)
                 result['_elu_cleanup']=dict(cleanup_report,review_url='/elu-review/'+review_token)
                 meta['field_values']={}
-                for field in meta['fields']:
+                for field in [name for name in frame.columns if name!='geometry']:
                     values=frame[field].dropna().astype(str).str.strip()
                     meta['field_values'][field]=values[values!=''].drop_duplicates().sort_values().head(1000).tolist()
             result[role]=meta
@@ -875,11 +888,17 @@ JOBS_LOCK = threading.Lock()
 def set_job(job_id, **kwargs):
     with JOBS_LOCK:
         JOBS.setdefault(job_id, {}).update(kwargs)
+        folder=WORK_ROOT/job_id
+        if folder.is_dir():
+            target=folder/'job_status.json'
+            temporary=folder/'job_status.json.tmp'
+            temporary.write_text(json.dumps(JOBS[job_id]))
+            temporary.replace(target)
 
 def extract_zip_path(zpath: Path, dest: Path):
     dest.mkdir(parents=True, exist_ok=True)
     with zipfile.ZipFile(zpath, 'r') as z:
-        z.extractall(dest)
+        runtime_limits.extract_checked(z,dest)
     shp_files = list(dest.rglob('*.shp'))
     if not shp_files:
         raise ValueError(f'No .shp file found in {zpath.name}')
@@ -911,9 +930,9 @@ def run_background(job_id, job, uploads, fields, elu_mapping):
         shp_elu=extract_zip_path(uploads['elu_zip'], job/'elu')
         shp_np=extract_zip_path(uploads['npaaad_zip'], job/'npaaad') if 'npaaad_zip' in uploads else uploads['npaaad_gpkg']
         shp_saf=extract_zip_path(uploads['safdz_zip'], job/'safdz') if 'safdz_zip' in uploads else uploads['safdz_gpkg']
-        elu_original=gpd.read_file(shp_elu)
+        elu_original=gpd.read_file(shp_elu,columns=[fields['elu']])
         elu_raw=gpd.read_file(uploads['_elu_cleaned_path'],layer='elu_cleaned') if '_elu_cleaned_path' in uploads else elu_original
-        np_raw=gpd.read_file(shp_np); saf_raw=gpd.read_file(shp_saf)
+        np_raw=gpd.read_file(shp_np,columns=[fields['npaaad']]); saf_raw=gpd.read_file(shp_saf,columns=[fields['safdz']])
         if np_raw.crs is None or saf_raw.crs is None: raise ValueError('NPAAAD or SAFDZ has a missing/unreadable CRS (.prj).')
         if not np_raw.crs.equals(saf_raw.crs): raise ValueError('NPAAAD and SAFDZ have different CRS. Processing stopped to protect spatial alignment.')
         target_crs=np_raw.crs
@@ -984,7 +1003,7 @@ def run_background(job_id, job, uploads, fields, elu_mapping):
                 raise ValueError(f'Classification field was lost after fast overlay: {f}')
         if 'landcover_zip' in uploads:
             progress(70, 'Processing Land Cover Map 2025')
-            shp_lc=extract_zip_path(uploads['landcover_zip'],job/'landcover'); lc_raw=gpd.read_file(shp_lc)
+            shp_lc=extract_zip_path(uploads['landcover_zip'],job/'landcover'); lc_raw=gpd.read_file(shp_lc,columns=[fields['landcover']])
             qa['LandCover_before']=fast_qa(lc_raw)
             if fields['landcover'] not in lc_raw.columns:
                 raise ValueError(f"Land Cover classification field '{fields['landcover']}' was not found. Please select a valid field before processing.")
@@ -1000,7 +1019,7 @@ def run_background(job_id, job, uploads, fields, elu_mapping):
         # CLUP so the approved-CLUP decision matrix can be evaluated per polygon.
         if 'clup_zip' in uploads:
             progress(76, 'Intersecting Approved CLUP polygons')
-            shp_clup=extract_zip_path(uploads['clup_zip'],job/'clup'); clup_raw=gpd.read_file(shp_clup)
+            shp_clup=extract_zip_path(uploads['clup_zip'],job/'clup'); clup_raw=gpd.read_file(shp_clup,columns=[fields['clup']])
             qa['CLUP_before']=fast_qa(clup_raw)
             if fields['clup'] not in clup_raw.columns:
                 raise ValueError(f"CLUP classification field '{fields['clup']}' was not found. Please select a valid field before processing.")
@@ -1101,6 +1120,15 @@ def run_background(job_id, job, uploads, fields, elu_mapping):
         qa['Final']['invalid_after_overlay']=final_invalid
         qa['Final']['geometry_validation']='PASS' if final_invalid==0 else 'FAIL'
         if final_invalid: raise ValueError(f'Final layer contains {final_invalid} invalid geometries. Export stopped.')
+        # Source uploads and overlay intermediates are no longer needed. Release
+        # them before making the several export copies of the final layer.
+        del elu_original,elu_raw,np_raw,saf_raw,elu_p,np_p,saf_p,elu,np_local,saf_local,np_clip,saf_clip,union1,elu_boundary,u
+        if 'lc_raw' in locals():del lc_raw,lc_p,lc_local,lc_clip
+        if 'clup_raw' in locals():del clup_raw,clup_p,clup_local,clup_clip
+        if 'poultry_raw' in locals():del poultry_raw,poultry_p
+        for name in ('uploads','elu','elu_validate','npaaad','safdz','landcover','clup','poultry'):
+            shutil.rmtree(job/name,ignore_errors=True)
+        runtime_limits.release_memory()
         progress(90, 'Generating Excel, Shapefile and QA/QC report')
         out_dir=job/'outputs'; out_dir.mkdir(); shp_dir=out_dir/'union_shapefile'; shp_dir.mkdir()
         from land_use_styles import apply_palette, write_styles
@@ -1108,10 +1136,12 @@ def run_background(job_id, job, uploads, fields, elu_mapping):
         qa['Land_use_style']=style_report
         shp_path=shp_dir/'HARMONIZED_UNION.shp'; styled_union.to_file(shp_path,encoding='UTF-8',index=False)
         write_styles(shp_path)
+        runtime_limits.ensure_space(sum(path.stat().st_size for path in shp_dir.iterdir() if path.is_file())+1024*1024)
         shp_zip=out_dir/'HARMONIZED_UNION.zip'
         with zipfile.ZipFile(shp_zip,'w',zipfile.ZIP_DEFLATED) as z:
             for q in shp_dir.iterdir(): z.write(q,q.name)
         xlsx=out_dir/'HARMONIZATION_SUMMARY.xlsx'; write_excel({'safdz':saf_matrix,'npaaad':np_matrix},union2,qa,xlsx,poultry_by_elu)
+        runtime_limits.ensure_space(sum(path.stat().st_size for path in out_dir.rglob('*') if path.is_file())+10*1024*1024)
         bundle=out_dir/'HARMONIZATION_RESULTS.zip'
         with zipfile.ZipFile(bundle,'w',zipfile.ZIP_DEFLATED) as z:
             if '_elu_cleaned_path' in uploads:
@@ -1129,10 +1159,40 @@ def run_background(job_id, job, uploads, fields, elu_mapping):
     except Exception as e:
         set_job(job_id,status='error',percent=JOBS.get(job_id,{}).get('percent',0),step='Processing Failed',elapsed=int(time.time()-started),error=str(e),details=traceback.format_exc())
 
+def run_background_guarded(job_id,job,uploads,fields,mapping):
+    try:
+        run_background(job_id,job,uploads,fields,mapping)
+    finally:
+        try:
+            state=JOBS.get(job_id,{})
+            runtime_limits.trim_job(job,state.get('bundle') if state.get('status')=='complete' else None)
+        finally:
+            runtime_limits.release_memory();runtime_limits.GIS_LOCK.release()
+
+
+def stored_job(job_id):
+    import re
+    if not re.fullmatch('[a-f0-9]{32}',job_id):return {}
+    with JOBS_LOCK:
+        data=dict(JOBS.get(job_id,{}))
+    if not data:
+        try:
+            candidate=json.loads((WORK_ROOT/job_id/'job_status.json').read_text())
+            if candidate.get('status')=='error' or (candidate.get('status')=='complete' and Path(candidate.get('bundle','')).is_file()):data=candidate
+        except (OSError,ValueError):pass
+    if data.get('status')=='complete' and not Path(data.get('bundle','')).is_file():
+        return {'status':'error','percent':100,'elapsed':data.get('elapsed',0),'error':'These temporary results have expired. Generate the results again.','expired':True}
+    return data
+
+
 @app.route('/process_start', methods=['POST'])
 def process_start():
     job=None
+    handed_off=False
+    if not runtime_limits.GIS_LOCK.acquire(blocking=False):
+        return jsonify({'error':'Another ELU reference detection or GIS generation is running. Please wait.','busy':True}),409
     try:
+        runtime_limits.cleanup();runtime_limits.ensure_space()
         if request.form.get('elu_reviewed')!='yes':
             raise ValueError('Confirm that you reviewed all ELU categories, including Other / Ignore.')
         try:
@@ -1157,8 +1217,8 @@ def process_start():
                 upload.save(path)
                 uploads[name]=path
         import elu_cleanup
-        original=gpd.read_file(extract_zip_path(uploads['elu_zip'],job/'elu_validate'))
         cleanup_field=request.form.get('elu_field','ELU').strip()
+        original=gpd.read_file(extract_zip_path(uploads['elu_zip'],job/'elu_validate'),columns=[cleanup_field])
         elu,cleanup_report,cleanup_issues=elu_cleanup.clean(original,cleanup_field,elu_cleanup.options(request.form))
         if cleanup_report['requires_review']:
             raise ValueError('Resolve ELU overlaps or missing classifications before generation. Review the geometry report.')
@@ -1181,21 +1241,27 @@ def process_start():
         fields={role:request.form.get(role+'_field',default).strip() for role,default in
                 [('elu','ELU'),('clup','CLUP'),('npaaad','NPAAAD'),('safdz','SAFDZ'),('landcover','CLASS')]}
         set_job(job_id,status='queued',percent=0,step='Preparing data',elapsed=0)
-        threading.Thread(target=run_background,args=(job_id,job,uploads,fields,elu_mapping),daemon=True).start()
+        del original,elu,cleanup_issues
+        threading.Thread(target=run_background_guarded,args=(job_id,job,uploads,fields,elu_mapping),daemon=True).start()
+        handed_off=True
         return jsonify({'job_id':job_id})
     except Exception as error:
         if job: shutil.rmtree(job,ignore_errors=True)
         return jsonify({'error':str(error)}),400
+    finally:
+        if not handed_off:
+            runtime_limits.release_memory();runtime_limits.GIS_LOCK.release()
 
 @app.route('/progress/<job_id>')
 def job_progress(job_id):
-    with JOBS_LOCK: data=dict(JOBS.get(job_id,{}))
+    data=stored_job(job_id)
     if not data: return jsonify({'error':'Job not found'}),404
     data.pop('bundle',None); return jsonify(data)
 
 @app.route('/download/<job_id>')
 def job_download(job_id):
-    with JOBS_LOCK: data=dict(JOBS.get(job_id,{}))
+    data=stored_job(job_id)
+    if data.get('expired'):return jsonify({'error':data['error']}),410
     if data.get('status')!='complete' or not data.get('bundle'): return jsonify({'error':'Results are not ready.'}),409
     return send_file(data['bundle'],as_attachment=True,download_name='HARMONIZATION_RESULTS.zip')
 
