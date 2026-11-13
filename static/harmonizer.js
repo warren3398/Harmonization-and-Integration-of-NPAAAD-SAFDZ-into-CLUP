@@ -19,10 +19,11 @@
  function fieldsReady(){return ['elu','npaaad','safdz',...['clup','landcover'].filter(role=>hasFile(role+'_zip'))].every(role=>!!file(role+'_field')?.value);}
  function pendingCount(){return Object.values(eluMap).filter(value=>!value).length;}
  function reviewReady(){return Object.keys(eluMap).length>0&&!pendingCount()&&!!$('eluReviewed')?.checked;}
- function ready(){return inspected&&hasFile('elu_zip')&&sourceReady()&&(mode.value!=='auto'||!!token.value)&&inspection?._crs_summary?.master_ok&&fieldsReady()&&reviewReady();}
+ function cleanupReady(){const report=inspection?._elu_cleanup;return !report?.requires_review&&(!report?.requires_change_confirmation||$('eluCleanupConfirmed').checked);}
+ function ready(){return cleanupReady()&&inspected&&hasFile('elu_zip')&&sourceReady()&&(mode.value!=='auto'||!!token.value)&&inspection?._crs_summary?.master_ok&&fieldsReady()&&reviewReady();}
  function refresh(){
   run.disabled=busy||!ready();
-  $('runHint').textContent=busy?'Processing your selected files. Inputs are locked until this job finishes.':run.disabled?'Complete uploads, select classification fields, and review every ELU description.':'Ready to generate the Excel summary, GIS layer, and QA/QC report.';
+  $('runHint').textContent=inspection?._elu_cleanup?.requires_review?'Review the ELU geometry conflicts before generation.':busy?'Processing your selected files. Inputs are locked until this job finishes.':run.disabled?'Complete uploads, select classification fields, and review every ELU description.':'Ready to generate the Excel summary, GIS layer, and QA/QC report.';
  }
  function updateMapping(){
   $('eluMapping').value=JSON.stringify(eluMap);
@@ -47,7 +48,7 @@
  }
  function invalidate(){
   clearTimeout(debounce);controller?.abort();sequence++;inspected=false;inspection=null;eluMap=Object.create(null);
-  $('eluMapping').value='{}';mapping.classList.add('hidden');cards.replaceChildren();
+  $('eluMapping').value='{}';mapping.classList.add('hidden');cards.replaceChildren();$('eluCleanupConfirmed').checked=false;$('eluReviewDownload').classList.add('hidden');$('eluReviewDownload').removeAttribute('href');
   $('progressPanel').classList.add('hidden');$('downloadBtn').classList.add('hidden');$('downloadBtn').removeAttribute('href');
   setStep(0);refresh();
  }
@@ -68,8 +69,8 @@
   try{
    const data=await readJSON(await fetch('/inspect',{method:'POST',body:new FormData(form),signal:controller.signal}),'Unable to inspect the files. The service may have restarted; please retry.');
    if(current!==sequence)return;
-   inspection=data;inspected=true;cards.replaceChildren();const crs=data._crs_summary||{};
-   if(mode.value==='auto'){
+   inspection=data;inspected=true;cards.replaceChildren();const crs=data._crs_summary||{};renderCleanup(data._elu_cleanup);
+   if(mode.value==='auto'&&!data._elu_cleanup?.requires_review){
     const detected=data._auto_reference;
     if(!detected?.token)throw Error('Automatic reference detection did not complete. Upload the ELU again.');
     token.value=detected.token;
@@ -87,13 +88,14 @@
      card.innerHTML+='<div id="eluMapBox" class="elu-map"><h3>ELU Description Mapping</h3><p class="hint">Select a category for every description. Other / Ignore produces no ELU-based recommendation for that description.</p><div id="eluMapRows" class="elu-map-rows"></div><p id="mappingCount" class="mapping-count" aria-live="polite"></p><label class="mapping-review"><input type="checkbox" id="eluReviewed" name="elu_reviewed" value="yes"><span>I reviewed all categories, including any descriptions marked Other / Ignore.</span></label></div>';
     }
     cards.append(card);
-    card.querySelector('select').addEventListener('change',e=>{if(role==='elu')renderElu(e.target.value);refresh();});
+    card.querySelector('select').addEventListener('change',e=>{if(role==='elu'){$('eluCleanupField').value=e.target.value;$('eluClassPriorities').value='{}';token.value='';inspectNow();}else refresh();});
    }
    mapping.classList.remove('hidden');setStep(1);
-   if(data.elu){renderElu(file('elu_field').value);$('eluReviewed').addEventListener('change',()=>{
+   if(data.elu){$('eluCleanupField').value=file('elu_field').value;renderElu(file('elu_field').value);$('eluReviewed').addEventListener('change',()=>{
     if($('eluReviewed').checked){const allIgnored=Object.values(eluMap).every(v=>v==='OTHER');notice(allIgnored?'Mapping confirmed. All ELU descriptions are ignored; ELU-based Decision recommendations will be blank.':'Mapping confirmed. Ready to run harmonization.',allIgnored?'warning':'ready');}
     else notice('Confirm the ELU mapping to continue.','warning');refresh();
    });}
+   if(data._elu_cleanup?.requires_review){showReference('Waiting for ELU geometry review','Resolve class conflicts or missing classifications before reference detection.','error');$('eluQualityPanel').open=true;}
    if(!crs.master_ok)notice(crs.error||'Upload NPAAAD and SAFDZ with matching coordinate systems.','error');
    refresh();
   }catch(error){if(current!==sequence||error.name==='AbortError')return;if(mode.value==='auto'&&error.message.includes('Another ELU reference detection')){notice('Waiting for reference detection to finish…');showReference('Preparing reference data…','Another detection is finishing. This upload will retry automatically.','loading');debounce=setTimeout(()=>inspect(current),2500);return;}inspected=false;mapping.classList.add('hidden');notice(error.message,'error');if(mode.value==='auto')showReference('Reference detection needs attention',error.message,'error');refresh();}
@@ -110,10 +112,29 @@
  manualToggle.addEventListener('change',syncSources);
  form.addEventListener('change',event=>{
   if(event.target.type==='file'){
-   if(event.target.name==='elu_zip'){token.value='';showReference('Ready to detect your area','The new ELU will be used to detect and crop reference data.');}
+   if(event.target.name==='elu_zip'){$('eluCleanupField').value='';$('eluClassPriorities').value='{}';token.value='';showReference('Ready to detect your area','The new ELU will be used to detect and crop reference data.');}
    inspectNow();
   }
  });
+ function renderCleanup(report){
+  if(!report)return;
+  const priorities=JSON.parse($('eluClassPriorities').value||'{}');
+  $('eluQualitySummary').textContent=`${report.invalid_features_repaired} invalid features repaired · ${report.same_class_overlap_removed_m2} m² of same-class overlap removed · ${report.enclosed_gaps_detected} enclosed gaps (${report.gaps_filled} filled, ${report.gaps_preserved} preserved) · ${report.overlap_conflicts.length} class conflicts (${report.overlaps_resolved?'resolved by priority':'pending review'})`;
+  $('eluConflictSummary').replaceChildren();
+  if(report.missing_class_features){const p=document.createElement('p');p.textContent=`${report.missing_class_features} features have no class. Choose the correct classification field or correct the source file.`;$('eluConflictSummary').append(p);}
+  for(const row of report.overlap_conflicts.slice(0,30)){const p=document.createElement('p');p.textContent=`${row.class_a} ↔ ${row.class_b}: ${row.area_m2} m²`;$('eluConflictSummary').append(p);}
+  if(report.overlap_conflicts.length>30){const p=document.createElement('p');p.textContent='More conflicts are listed in the downloadable geometry review.';$('eluConflictSummary').append(p);}
+  $('eluPriorityRows').replaceChildren();
+  if($('eluOverlapPolicy').value==='priority'&&report.conflicting_classes.length){
+   const help=document.createElement('p');help.className='hint';help.textContent='Assign a unique rank to each conflicting class. Rank 1 wins overlaps before rank 2, and so on. No priority is assigned automatically.';$('eluPriorityRows').append(help);
+   for(const name of report.conflicting_classes){const label=document.createElement('label');label.innerHTML=`<span>${esc(name)}</span><input type="number" min="1" step="1" aria-label="Overlap priority for ${esc(name)}">`;const input=label.querySelector('input');input.value=priorities[name]||'';input.addEventListener('change',()=>{if(input.value)priorities[name]=Number(input.value);else delete priorities[name];$('eluClassPriorities').value=JSON.stringify(priorities);inspectNow();});$('eluPriorityRows').append(label);}
+  }
+  $('eluCleanupConfirmed').checked=false;$('eluCleanupConfirmRow').classList.toggle('hidden',!report.requires_change_confirmation);
+  $('eluReviewDownload').href=report.review_url;$('eluReviewDownload').classList.remove('hidden');
+  if(report.invalid_features_repaired||report.enclosed_gaps_detected||report.overlap_conflicts.length||report.missing_class_features)$('eluQualityPanel').open=true;
+ }
+ for(const id of ['eluFillGaps','eluGapMax','eluOverlapPolicy'])$(id).addEventListener('change',()=>{inspectNow();});
+ $('eluCleanupConfirmed').addEventListener('change',refresh);
  function lockInputs(locked){
   for(const el of form.querySelectorAll('input,select')){
    if(locked){el.dataset.preJobDisabled=String(el.disabled);el.disabled=true;}
@@ -150,3 +171,4 @@
  window.addEventListener('beforeunload',event=>{if(busy){event.preventDefault();event.returnValue='';}});
  setStep(0);syncSources();
 })();
+

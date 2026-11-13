@@ -93,3 +93,13 @@
 .harmonizer-page .manual-reference-toggle{font-size:11px}
 @keyframes reference-spin{to{transform:rotate(360deg)}}
 @media(prefers-reduced-motion:reduce){.harmonizer-page .reference-indicator{animation:none!important}}
+
+
+.harmonizer-page .cleanup-options{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:14px;margin-top:14px}
+.harmonizer-page .cleanup-options>.mapping-review{grid-column:1/-1;margin:0}
+.harmonizer-page .cleanup-options label{font-size:11px}
+.harmonizer-page .cleanup-conflicts{font-size:11px;max-height:180px;overflow:auto;overflow-wrap:anywhere;color:#835d30;line-height:1.6}
+.harmonizer-page .cleanup-priorities label{display:grid;grid-template-columns:minmax(0,1fr) 85px;align-items:center;gap:12px;margin:10px 0;font-size:12px;overflow-wrap:anywhere}
+.harmonizer-page .cleanup-review-download{display:inline-block;font-size:12px;color:#18664a;margin:12px 0}
+.harmonizer-page .cleanup-review-download.hidden,.harmonizer-page .elu-quality .hidden{display:none}
+@media(max-width:480px){.harmonizer-page .cleanup-options{grid-template-columns:minmax(0,1fr)}}

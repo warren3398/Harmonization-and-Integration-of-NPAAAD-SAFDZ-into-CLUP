@@ -801,15 +801,23 @@ def inspect_layers():
             if not upload or not upload.filename: continue
             frame,meta=inspect_uploaded_shapefile(upload,job/role)
             suggested=suggest_field(meta['fields'],role)
+            if role=='elu' and request.form.get('elu_cleanup_field') in meta['fields']:
+                suggested=request.form['elu_cleanup_field']
             meta['suggested_field']=suggested
             meta['sample_values']=field_preview(frame,suggested)
             if role=='elu':
-                elu=frame
+                import elu_cleanup
+                elu,cleanup_report,cleanup_issues=elu_cleanup.clean(frame,suggested,elu_cleanup.options(request.form))
+                review_token=elu_cleanup.save_review(elu,cleanup_report,cleanup_issues)
+                result['_elu_cleanup']=dict(cleanup_report,review_url='/elu-review/'+review_token)
                 meta['field_values']={}
                 for field in meta['fields']:
                     values=frame[field].dropna().astype(str).str.strip()
                     meta['field_values'][field]=values[values!=''].drop_duplicates().sort_values().head(1000).tolist()
             result[role]=meta
+        if result.get('_elu_cleanup',{}).get('requires_review'):
+            result['_crs_summary']={'master_ok':False,'master_crs':None,'error':'Resolve ELU overlaps or missing classes before reference detection.'}
+            return jsonify(result)
         paths={}
         if automatic:
             import auto_reference
@@ -850,6 +858,15 @@ def inspect_layers():
         return jsonify({'error':str(error)}),400
     finally:
         shutil.rmtree(job,ignore_errors=True)
+
+
+@app.route('/elu-review/<token>')
+def elu_review_download(token):
+    import elu_cleanup
+    try:
+        return send_file(elu_cleanup.review_path(token),as_attachment=True,download_name='ELU_GEOMETRY_REVIEW.zip')
+    except ValueError as error:
+        return jsonify({'error':str(error)}),404
 
 
 JOBS = {}
@@ -894,13 +911,17 @@ def run_background(job_id, job, uploads, fields, elu_mapping):
         shp_elu=extract_zip_path(uploads['elu_zip'], job/'elu')
         shp_np=extract_zip_path(uploads['npaaad_zip'], job/'npaaad') if 'npaaad_zip' in uploads else uploads['npaaad_gpkg']
         shp_saf=extract_zip_path(uploads['safdz_zip'], job/'safdz') if 'safdz_zip' in uploads else uploads['safdz_gpkg']
-        elu_raw=gpd.read_file(shp_elu); np_raw=gpd.read_file(shp_np); saf_raw=gpd.read_file(shp_saf)
+        elu_original=gpd.read_file(shp_elu)
+        elu_raw=gpd.read_file(uploads['_elu_cleaned_path'],layer='elu_cleaned') if '_elu_cleaned_path' in uploads else elu_original
+        np_raw=gpd.read_file(shp_np); saf_raw=gpd.read_file(shp_saf)
         if np_raw.crs is None or saf_raw.crs is None: raise ValueError('NPAAAD or SAFDZ has a missing/unreadable CRS (.prj).')
         if not np_raw.crs.equals(saf_raw.crs): raise ValueError('NPAAAD and SAFDZ have different CRS. Processing stopped to protect spatial alignment.')
         target_crs=np_raw.crs
         # v1.8: the former full overlap/duplicate QA scan was the main reason the
         # UI appeared stuck at 5%. Use a fast validity/count QA during the run.
-        qa={'ELU_before':fast_qa(elu_raw),'NPAAAD_before':fast_qa(np_raw),'SAFDZ_before':fast_qa(saf_raw)}
+        qa={'ELU_before':fast_qa(elu_original),'NPAAAD_before':fast_qa(np_raw),'SAFDZ_before':fast_qa(saf_raw)}
+        if '_elu_cleanup_report' in uploads:
+            qa['ELU_cleanup']=uploads['_elu_cleanup_report']
         if '_auto_reference' in uploads:
             qa['Reference_detection']={key:value for key,value in uploads['_auto_reference'].items() if key not in ('token','boundary_hash')}
         progress(15, 'Preparing layers')
@@ -1089,6 +1110,9 @@ def run_background(job_id, job, uploads, fields, elu_mapping):
         xlsx=out_dir/'HARMONIZATION_SUMMARY.xlsx'; write_excel({'safdz':saf_matrix,'npaaad':np_matrix},union2,qa,xlsx,poultry_by_elu)
         bundle=out_dir/'HARMONIZATION_RESULTS.zip'
         with zipfile.ZipFile(bundle,'w',zipfile.ZIP_DEFLATED) as z:
+            if '_elu_cleaned_path' in uploads:
+                z.write(uploads['_elu_cleaned_path'],'ELU_GEOMETRY_REVIEW.gpkg')
+                z.writestr('ELU_CLEANUP_REPORT.json',json.dumps(uploads['_elu_cleanup_report'],indent=2))
             z.write(xlsx,xlsx.name); z.write(shp_zip,shp_zip.name)
             if poultry_clip is not None:
                 pdir=out_dir/'poultry_clipped'; pdir.mkdir(exist_ok=True); pshp=pdir/'POULTRY_CLIPPED.shp'; poultry_clip.to_file(pshp)
@@ -1128,9 +1152,20 @@ def process_start():
                 path=up/(name+'.zip')
                 upload.save(path)
                 uploads[name]=path
+        import elu_cleanup
+        original=gpd.read_file(extract_zip_path(uploads['elu_zip'],job/'elu_validate'))
+        cleanup_field=request.form.get('elu_field','ELU').strip()
+        elu,cleanup_report,cleanup_issues=elu_cleanup.clean(original,cleanup_field,elu_cleanup.options(request.form))
+        if cleanup_report['requires_review']:
+            raise ValueError('Resolve ELU overlaps or missing classifications before generation. Review the geometry report.')
+        if cleanup_report['requires_change_confirmation'] and request.form.get('elu_cleanup_confirmed')!='yes':
+            raise ValueError('Confirm the gap filling and/or class-priority changes before generation.')
+        review_path=job/'ELU_GEOMETRY_REVIEW.gpkg'
+        elu_cleanup.write_review(review_path,elu,cleanup_issues)
+        uploads['_elu_cleaned_path']=review_path
+        uploads['_elu_cleanup_report']=cleanup_report
         if automatic:
             import auto_reference
-            elu=gpd.read_file(extract_zip_path(uploads['elu_zip'],job/'elu_validate'))
             folder,meta=auto_reference.load(request.form.get('auto_reference_token'),elu)
             for role in ('npaaad','safdz'):
                 path=up/(role+'.gpkg')
@@ -1162,4 +1197,5 @@ def job_download(job_id):
 
 if __name__ == '__main__':
     port=int(os.environ.get('PORT','5055')); app.run(host='127.0.0.1',port=port,debug=False,use_reloader=False,threaded=True)
+
 

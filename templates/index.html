@@ -1,6 +1,6 @@
 <!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>NPAAAD/SAFDZ–CLUP Harmonization</title><link rel="stylesheet" href="/static/style.css"><link rel="stylesheet" href="/static/harmonizer.css?v=3"></head>
+<title>NPAAAD/SAFDZ–CLUP Harmonization</title><link rel="stylesheet" href="/static/style.css"><link rel="stylesheet" href="/static/harmonizer.css?v=4"></head>
 <body class="harmonizer-page"><div class="shell"><aside>
 <div class="agency-brand">
   <div class="agency-logos"><img class="bswm-logo" src="/static/assets/da_bswm_logo.png" alt="DA BSWM logo"><img class="almed-logo" src="/static/assets/almed_logo.png" alt="ALMED logo"></div>
@@ -25,6 +25,17 @@
 <details id="manualR2"><summary>Advanced · Use your own NPAAAD and SAFDZ files</summary><label class="mapping-review manual-reference-toggle"><input type="checkbox" id="manualReferenceToggle"><span>Use manual reference uploads instead of automatic detection</span></label><div id="manualReferenceFiles" class="dataset-grid manual-grid hidden"><label>NPAAAD ZIP<input type="file" name="npaaad_zip" accept=".zip" disabled></label><label>SAFDZ ZIP<input type="file" name="safdz_zip" accept=".zip" disabled></label></div></details></div>
 </div><details class="optional-layers"><summary>Advanced Options · Optional GIS layers</summary><p class="hint">Add these only when needed for your analysis.</p><div class="grid"><label>Approved / Proposed CLUP (optional)<input type="file" name="clup_zip" accept=".zip"></label><label>Land Cover Map 2025 (optional)<input type="file" name="landcover_zip" accept=".zip"></label>
 <label>Poultry Shapefile (optional)<input type="file" name="poultry_zip" accept=".zip"></label></div></details>
+<details id="eluQualityPanel" class="optional-layers elu-quality"><summary>ELU geometry cleanup &amp; review</summary>
+<p class="hint">Invalid polygons are repaired and same-class overlaps are merged automatically. Enclosed gaps are preserved unless you enable filling. Gaps outside the footprint cannot be inferred without an outer boundary.</p>
+<input type="hidden" name="elu_cleanup_field" id="eluCleanupField" value=""><input type="hidden" name="elu_class_priorities" id="eluClassPriorities" value="{}">
+<div class="cleanup-options"><label class="mapping-review"><input type="checkbox" name="elu_fill_gaps" id="eluFillGaps" value="yes"><span>Fill small enclosed gaps with one adjacent class only</span></label>
+<label>Maximum gap area (m²)<input type="number" name="elu_gap_max_m2" id="eluGapMax" value="10" min="0" max="10000" step="0.1"></label>
+<label>Overlaps between different classes<select name="elu_overlap_policy" id="eluOverlapPolicy"><option value="review">Stop and review conflicts</option><option value="priority">Apply an explicit class priority</option></select></label></div>
+<p id="eluQualitySummary" class="hint" role="status" aria-live="polite">Upload ELU to check geometry, enclosed gaps, and overlaps.</p>
+<div id="eluConflictSummary" class="cleanup-conflicts"></div><div id="eluPriorityRows" class="cleanup-priorities"></div>
+<a id="eluReviewDownload" class="cleanup-review-download hidden">Download geometry review ZIP</a>
+<label id="eluCleanupConfirmRow" class="mapping-review hidden"><input type="checkbox" name="elu_cleanup_confirmed" id="eluCleanupConfirmed" value="yes"><span>I reviewed and accept the gap filling and/or class-priority changes shown in this report.</span></label>
+</details>
 <div id="inspectMsg" class="inspection-status" role="status" aria-live="polite">Select shapefile ZIPs. Fields and CRS are detected automatically.</div>
 <div id="mapping" class="hidden" tabindex="-1"><div class="section-heading"><span class="section-number">02</span><div><h2>Review layer settings</h2><p class="hint">Match your fields and confirm each land use category.</p></div></div><div id="crsBanner" class="crs-banner"></div><input type="hidden" name="elu_mapping" id="eluMapping" value="{}"><div id="layerCards" class="layer-cards"></div></div>
 <details class="method-rules"><summary>Classification rules</summary><div class="rules"><div><b>Aglng-SZ</b><span>SAFDZ = 2</span></div><div><b>PTA-SZ</b><span>NPAAAD = A, B, D, E, F, G</span></div><div><b>PDA-SZ</b><span>NPAAAD = C</span></div></div>
@@ -45,4 +56,5 @@
 <div class="help-tip"><span class="tip-heading">A GOOD START</span><p>Upload your ELU with its correct coordinate reference system. Reference layers are detected and cropped automatically. Review the classification field before running.</p></div></div>
 <div class="agency-credit"><strong>Built for agricultural land planning</strong><span>Department of Agriculture</span><span>Bureau of Soils and Water Management</span><span>Agricultural Land Management and Evaluation Division</span></div></section></div>
 <footer class="workspace-footer"><span>NPAAAD / SAFDZ — CLUP Harmonizer</span><span>DA · BSWM · ALMED</span></footer></main></div>
-<script src="/static/harmonizer.js?v=3" defer></script></body></html>
+<script src="/static/harmonizer.js?v=4" defer></script></body></html>
+

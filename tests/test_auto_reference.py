@@ -146,7 +146,7 @@ def test_browser_auto_upload_and_responsive_layout(setup):
     screenshots=Path('test-artifacts');screenshots.mkdir(exist_ok=True)
     try:
         with sync_playwright() as playwright:
-            browser=playwright.chromium.launch()
+            browser=playwright.chromium.launch(**({'executable_path':__import__('os').environ['PLAYWRIGHT_CHROMIUM_EXECUTABLE']} if __import__('os').environ.get('PLAYWRIGHT_CHROMIUM_EXECUTABLE') else {}))
             page=browser.new_page(viewport={'width':1440,'height':1000})
             errors=[];page.on('pageerror',lambda error:errors.append(str(error)))
             page.goto(f'http://127.0.0.1:{server.server_port}/harmonizer')
@@ -175,3 +175,81 @@ def test_browser_auto_upload_and_responsive_layout(setup):
             browser.close()
     finally:
         server.shutdown()
+
+
+
+def test_browser_overlap_priority_and_cleanup_confirmation(setup):
+    from werkzeug.serving import make_server
+    from playwright.sync_api import sync_playwright
+    server=make_server('127.0.0.1',0,module.app,threaded=True)
+    threading.Thread(target=server.serve_forever,daemon=True).start()
+    data=gpd.GeoDataFrame({'LAND_USE':['AGR','BU']},geometry=[box(121.011,15.005,121.022,15.015),box(121.019,15.005,121.029,15.015)],crs=4326).to_crs(32651)
+    folder=setup['root']/'conflict';folder.mkdir();data.to_file(folder/'conflict.shp',index=False)
+    content=io.BytesIO()
+    with zipfile.ZipFile(content,'w') as archive:
+        for path in folder.iterdir():archive.write(path,path.name)
+    try:
+        with sync_playwright() as playwright:
+            browser=playwright.chromium.launch(**({'executable_path':__import__('os').environ['PLAYWRIGHT_CHROMIUM_EXECUTABLE']} if __import__('os').environ.get('PLAYWRIGHT_CHROMIUM_EXECUTABLE') else {}))
+            page=browser.new_page(viewport={'width':390,'height':1000})
+            page.goto(f'http://127.0.0.1:{server.server_port}/harmonizer')
+            page.locator('[name=elu_zip]').set_input_files({'name':'conflict.zip','mimeType':'application/zip','buffer':content.getvalue()})
+            page.locator('#eluConflictSummary p').first.wait_for(timeout=15000)
+            assert page.locator('#runBtn').is_disabled()
+            assert page.locator('#eluReviewDownload').is_visible()
+            assert page.locator('#autoReferenceToken').input_value()==''
+            page.locator('#eluOverlapPolicy').select_option('priority')
+            page.locator('#eluPriorityRows input').first.wait_for(timeout=15000)
+            # Fill and dispatch both changes in one event-loop turn, like quickly
+            # completing the priority controls before the debounce runs.
+            page.evaluate("""() => {document.querySelectorAll('#eluPriorityRows input').forEach((input,i)=>{input.value=String(i+1);input.dispatchEvent(new Event('change',{bubbles:true}));});}""")
+            page.wait_for_function("document.querySelector('#autoReferenceToken').value.length > 0",timeout=15000)
+            for select in page.locator('#eluMapRows select').all():select.select_option('AGR')
+            page.locator('#eluReviewed').check()
+            assert page.locator('#runBtn').is_disabled()
+            page.locator('#eluCleanupConfirmed').check()
+            assert page.locator('#runBtn').is_enabled()
+            page.locator('#runBtn').click()
+            page.locator('#downloadBtn').wait_for(state='visible',timeout=20000)
+            bundle=page.request.get(page.locator('#downloadBtn').evaluate('(element)=>element.href'))
+            assert bundle.ok
+            with zipfile.ZipFile(io.BytesIO(bundle.body())) as archive:
+                report=json.loads(archive.read('ELU_CLEANUP_REPORT.json'))
+                assert report['overlaps_resolved'] and not report['requires_review']
+                assert 'ELU_GEOMETRY_REVIEW.gpkg' in archive.namelist()
+            browser.close()
+    finally:
+        server.shutdown()
+
+
+def test_gap_filling_refreshes_reference_crop_and_exports_report(setup):
+    point=setup['elu'].geometry.iloc[0].representative_point()
+    outer=box(point.x-10,point.y-10,point.x+10,point.y+10)
+    hole=box(point.x-1,point.y-1,point.x+1,point.y+1)
+    geometry=Polygon(outer.exterior.coords,[hole.exterior.coords])
+    frame=gpd.GeoDataFrame({'LAND_USE':['Agriculture']},geometry=[geometry],crs=setup['elu'].crs)
+    folder=setup['root']/'small-gap';folder.mkdir();frame.to_file(folder/'elu.shp',index=False)
+    content=io.BytesIO()
+    with zipfile.ZipFile(content,'w') as archive:
+        for path in folder.iterdir():archive.write(path,path.name)
+    raw=content.getvalue();client=module.app.test_client()
+    first=client.post('/inspect',data={'reference_mode':'auto','elu_zip':upload(raw)})
+    assert first.status_code==200,first.json
+    original_token=first.json['_auto_reference']['token']
+    filled=client.post('/inspect',data={'reference_mode':'auto','elu_zip':upload(raw),'auto_reference_token':original_token,'elu_fill_gaps':'yes','elu_gap_max_m2':'10'})
+    assert filled.status_code==200,filled.json
+    assert filled.json['_elu_cleanup']['gaps_filled']==1
+    assert filled.json['_auto_reference']['token']!=original_token
+    response=client.post('/process_start',data={'reference_mode':'auto','elu_zip':upload(raw),
+       'auto_reference_token':filled.json['_auto_reference']['token'],'elu_fill_gaps':'yes','elu_gap_max_m2':'10','elu_cleanup_confirmed':'yes',
+       'elu_reviewed':'yes','elu_field':'LAND_USE','npaaad_field':'NPAAAD','safdz_field':'SAFDZ','elu_mapping':json.dumps({'Agriculture':'AGR'})})
+    assert response.status_code==200,response.json
+    for _ in range(150):
+        state=client.get('/progress/'+response.json['job_id']).json
+        if state['status'] in ('complete','error'):break
+        time.sleep(.1)
+    assert state['status']=='complete',state
+    with zipfile.ZipFile(io.BytesIO(client.get('/download/'+response.json['job_id']).data)) as archive:
+        report=json.loads(archive.read('ELU_CLEANUP_REPORT.json'))
+        assert report['gaps_filled']==1
+        assert report['gap_area_filled_m2']==pytest.approx(4,abs=.001)
