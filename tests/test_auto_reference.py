@@ -136,6 +136,8 @@ def test_inspect_reuse_and_real_job(setup):
         assert qa['Reference_detection']['cropped_to_elu']
         assert qa['Reference_detection']['coverage_percent']['npaaad']==100
         assert 'HARMONIZED_UNION.zip' in archive.namelist()
+        with zipfile.ZipFile(io.BytesIO(archive.read('HARMONIZED_UNION.zip'))) as styled:
+            assert {'HARMONIZED_UNION.qml','HARMONIZED_UNION.sld','LAND_USE_PALETTE.csv','STYLE_README.txt'} <= set(styled.namelist())
 
 
 def test_browser_auto_upload_and_responsive_layout(setup):

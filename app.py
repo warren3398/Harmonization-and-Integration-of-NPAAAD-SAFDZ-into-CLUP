@@ -1103,7 +1103,11 @@ def run_background(job_id, job, uploads, fields, elu_mapping):
         if final_invalid: raise ValueError(f'Final layer contains {final_invalid} invalid geometries. Export stopped.')
         progress(90, 'Generating Excel, Shapefile and QA/QC report')
         out_dir=job/'outputs'; out_dir.mkdir(); shp_dir=out_dir/'union_shapefile'; shp_dir.mkdir()
-        shp_path=shp_dir/'HARMONIZED_UNION.shp'; union2.to_file(shp_path)
+        from land_use_styles import apply_palette, write_styles
+        styled_union,style_report=apply_palette(union2,internal['elu'])
+        qa['Land_use_style']=style_report
+        shp_path=shp_dir/'HARMONIZED_UNION.shp'; styled_union.to_file(shp_path,encoding='UTF-8',index=False)
+        write_styles(shp_path)
         shp_zip=out_dir/'HARMONIZED_UNION.zip'
         with zipfile.ZipFile(shp_zip,'w',zipfile.ZIP_DEFLATED) as z:
             for q in shp_dir.iterdir(): z.write(q,q.name)
