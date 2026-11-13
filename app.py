@@ -719,7 +719,9 @@ def eo79_module():
     <p id="eo79-export-status" style="max-width:300px;overflow-wrap:anywhere"></p></section>
     <style>#eo79-export-panel select,#eo79-export-panel input[type=file]{display:block;width:100%;margin:7px 0;padding:5px}#eo79-generate{background:#17643f;color:white;border:0;border-radius:6px;padding:10px;cursor:pointer}@media print{#eo79-export-panel{display:none!important}}</style>
     """ + '<div class="status warn" id="exportStatus">', 1)
-    page = page.replace('</body>', '<script src="/static/eo79_export.js?v=step5-restore-2"></script></body>', 1)
+    page = page.replace('</body>', '<script src="/static/eo79_export.js?v=responsive-1"></script></body>', 1)
+    page = page.replace('</head>', '<link rel="stylesheet" href="/static/eo79_layout.css?v=responsive-1"></head>', 1)
+    page = page.replace('</body>', '<script src="/static/eo79_layout.js?v=responsive-1"></script></body>', 1)
     return Response(page, mimetype='text/html')
 
 
@@ -1104,3 +1106,4 @@ def job_download(job_id):
 
 if __name__ == '__main__':
     port=int(os.environ.get('PORT','5055')); app.run(host='127.0.0.1',port=port,debug=False,use_reloader=False,threaded=True)
+
