@@ -2,7 +2,7 @@
 document.addEventListener('DOMContentLoaded',()=>{
 const $=id=>document.getElementById(id),sidebar=document.querySelector('.sidebar'),stage=document.querySelector('.stage');
 if(!sidebar||!stage||!$('printLayout'))return;
-document.body.dataset.eo79Layout='responsive-2';
+document.body.dataset.eo79Layout='responsive-3';
 const sections=[$('sec1'),$('sec2'),$('sec5')];
 sections.forEach((sec,i)=>{const heading=sec.querySelector('h2');heading.textContent=heading.textContent.replace(/^\d+\.\s*/,'');heading.dataset.step=String(i+1);sec.querySelector('.detail-toggle')?.remove();});
 $('sec5').querySelector('h2').textContent='Generate & Download';
@@ -18,11 +18,12 @@ $('sec1').append(parcelStatus);parcelDetails.remove();
 coordinateSection.querySelector('button').textContent='Reload parcel and auto-fix';
 extras.append(coordinateSection,$('sec3'));
 const mapDetails=$('sec4');mapDetails.classList.add('eo79-map-details');mapDetails.querySelector('.detail-toggle')?.remove();
-mapDetails.querySelector('h2').textContent='Map Title / Details';
+mapDetails.querySelector('h2').textContent='Map Details';
+const fixedTitle=$('titleInput');fixedTitle.previousElementSibling?.remove();fixedTitle.type='hidden';fixedTitle.readOnly=true;fixedTitle.value='STRATEGIC AGRICULTURE AND FISHERIES DEVELOPMENT ZONE (SAFDZ) MAP';mapDetails.append(fixedTitle);
 mapDetails.querySelector('.section-top').append($('applyText'));
 const textFields=document.createElement('div');textFields.className='eo79-map-text-fields';
-for(const id of ['titleInput','permitInput','locationInput']){
- const input=$(id),label=input.previousElementSibling,field=document.createElement('div');field.className='eo79-map-text-field'+(id==='titleInput'?' full':'');
+for(const id of ['permitInput','locationInput']){
+ const input=$(id),label=input.previousElementSibling,field=document.createElement('div');field.className='eo79-map-text-field';
  if(label?.tagName==='LABEL')field.append(label);field.append(input);textFields.append(field);
 }
 mapDetails.querySelector('.section-details').replaceChildren(textFields);

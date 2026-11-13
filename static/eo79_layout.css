@@ -41,15 +41,14 @@ body.eo79-exporting #eo79-preview-viewport{overflow:visible!important}body.eo79-
 @media(max-width:540px){.header-eo-main{font-size:23px!important;line-height:1.2!important}.header-eo-sub{font-size:13px!important}.agency-right-group{flex-direction:column!important;gap:12px!important;padding:16px 20px!important}.agency-header-titles{text-align:center!important;width:100%}.agency-header-da{font-size:18px!important;line-height:1.3!important}.agency-header-bswm{font-size:14px!important}.agency-header-almed{font-size:12px!important}.header-logos{justify-content:center!important}.header-logos .da-bswm{max-width:120px!important;max-height:58px!important}.header-logos .almed-logo{max-width:62px!important;max-height:50px!important}.sidebar{padding:12px!important}.stage{padding:12px!important}.eo79-preview-tools{gap:6px;padding:9px}.eo79-preview-tools .toolbar-label{flex-basis:100%;font-size:14px}.eo79-preview-tools label{flex-basis:100%;justify-content:space-between}.eo79-preview-tools select{flex:1;max-width:none}.eo79-preview-tools button{font-size:12px;min-height:40px;padding:7px 9px}.eo79-preview-tools output{font-size:12px}.eo79-advanced .row{grid-template-columns:1fr}#eo79-preview-viewport{padding:10px;min-height:220px;height:auto;max-height:70dvh}}
 @media print{.eo79-preview-tools,.eo79-preview-hint,.eo79-workflow-status{display:none!important}.stage{position:static!important;padding:0!important}.app{display:block!important}#eo79-preview-viewport{height:auto!important;overflow:visible!important;padding:0!important;background:none;border:0}#eo79-paper-space{width:auto!important;height:auto!important}#layoutWrap{position:static!important;transform:none!important;filter:none!important}}
 
-/* Keep map text available above the preview for every export. */
-.eo79-map-details{margin:0 0 12px!important;padding:14px 16px!important;box-shadow:none!important}
-.eo79-map-details h2:before{display:none!important}
-.eo79-map-details .section-top{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:10px}
-.eo79-map-details #applyText{width:auto;min-height:38px;flex:none;margin:0;padding:8px 15px;font-size:13px}
-.eo79-map-text-fields{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:10px 16px}
-.eo79-map-text-field{min-width:0}.eo79-map-text-field.full{grid-column:1/-1}
-.eo79-map-text-field label{margin:0 0 5px;font-size:13px!important}
-.eo79-map-text-field input,.eo79-map-text-field textarea{width:100%;font-size:14px;line-height:1.4;padding:9px 11px}
-.eo79-map-text-field textarea{min-height:43px;height:43px;resize:vertical}
-@media(max-width:540px){.eo79-map-details{padding:13px!important}.eo79-map-details .section-top{align-items:flex-start;flex-direction:column;gap:9px}.eo79-map-details #applyText{width:100%;min-height:42px}.eo79-map-text-fields{grid-template-columns:1fr}.eo79-map-text-field.full{grid-column:auto}.eo79-map-text-field textarea{height:65px}}
+/* Compact permit and location editor; the official map title is fixed. */
+.eo79-map-details{margin:0 0 10px!important;padding:10px 12px!important;box-shadow:none!important}
+.eo79-map-details h2:before{display:none!important}.eo79-map-details h2{font-size:14px!important}
+.eo79-map-details .section-top{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:7px}
+.eo79-map-details #applyText{width:auto;min-height:32px;flex:none;margin:0;padding:6px 11px;font-size:12px}
+.eo79-map-text-fields{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:8px 12px}
+.eo79-map-text-field{min-width:0}.eo79-map-text-field label{margin:0 0 4px;font-size:12px!important;line-height:1.3}
+.eo79-map-text-field input,.eo79-map-text-field textarea{width:100%;font-size:13px;line-height:1.35;padding:7px 9px;min-height:34px;height:34px}
+.eo79-map-text-field textarea{resize:vertical;max-height:120px}
+@media(max-width:540px){.eo79-map-details{padding:10px!important}.eo79-map-details .section-top{flex-direction:row;align-items:center;gap:8px}.eo79-map-details #applyText{width:auto;min-height:34px}.eo79-map-text-fields{gap:8px}.eo79-map-text-field label{min-height:31px;font-size:11px!important}.eo79-map-text-field input,.eo79-map-text-field textarea{font-size:13px;height:36px;min-height:36px}}
 @media print{.eo79-map-details{display:none!important}}
