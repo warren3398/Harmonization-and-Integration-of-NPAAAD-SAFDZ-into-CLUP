@@ -18,6 +18,8 @@ import app as module
 
 @pytest.fixture
 def setup(tmp_path, monkeypatch):
+    import workspace_ux
+    monkeypatch.setattr(workspace_ux,'suggest_municipality',lambda elu:'Test Municipality')
     monkeypatch.setattr(auto_reference, 'ROOT', tmp_path/'references')
     monkeypatch.setattr(module, 'WORK_ROOT', tmp_path/'jobs')
     module.WORK_ROOT.mkdir()
@@ -165,13 +167,14 @@ def test_browser_auto_upload_and_responsive_layout(setup):
             assert page.locator('#r2_province').count()==0
             assert page.locator('[name=npaaad_zip]').is_disabled()
             page.locator('[name=elu_zip]').set_input_files({'name':'elu.zip','mimeType':'application/zip','buffer':setup['raw']})
-            page.locator('#eluMapRows select').first.wait_for(timeout=15000)
+            page.wait_for_function("document.querySelector('#autoReferenceToken').value.length > 0",timeout=15000)
             assert page.locator('#autoReferenceToken').input_value()
             assert 'cropped to your ELU' in page.locator('#autoReferenceHeading').inner_text()
-            assert page.locator('#runBtn').is_disabled()
-            page.locator('#eluMapRows select').first.select_option('AGR')
-            page.locator('#eluReviewed').check()
+            assert page.locator('#eluMapBox').is_hidden()
             assert page.locator('#runBtn').is_enabled()
+            assert page.locator('#outputMunicipality').input_value()=='Test Municipality'
+            assert page.locator('[name=landcover_zip]').locator('xpath=ancestor::details').count()==0
+            assert 'elu.zip' in page.locator('.upload-selection').first.inner_text()
             for width in (1440,768,390,320):
                 page.set_viewport_size({'width':width,'height':1000})
                 dimensions=page.evaluate('''() => ({width:innerWidth,page:document.documentElement.scrollWidth,overflow:[...document.querySelectorAll('.elu-map-row')].some(e=>e.scrollWidth>e.clientWidth+1)})''')
@@ -182,6 +185,10 @@ def test_browser_auto_upload_and_responsive_layout(setup):
             page.locator('#runBtn').click()
             page.locator('#downloadBtn').wait_for(state='visible',timeout=20000)
             assert page.locator('[role=progressbar]').get_attribute('aria-valuenow')=='100'
+            with page.expect_download() as saved:page.locator('#downloadBtn').click()
+            assert saved.value.suggested_filename=='Test_Municipality_NPAAAD_SAFDZ_Harmonize_Agricultural_Zones.zip'
+            page.reload()
+            assert page.locator('#mainForm').is_visible()
             assert not errors,errors
             browser.close()
     finally:
@@ -215,8 +222,6 @@ def test_browser_overlap_priority_and_cleanup_confirmation(setup):
             # completing the priority controls before the debounce runs.
             page.evaluate("""() => {document.querySelectorAll('#eluPriorityRows input').forEach((input,i)=>{input.value=String(i+1);input.dispatchEvent(new Event('change',{bubbles:true}));});}""")
             page.wait_for_function("document.querySelector('#autoReferenceToken').value.length > 0",timeout=15000)
-            for select in page.locator('#eluMapRows select').all():select.select_option('AGR')
-            page.locator('#eluReviewed').check()
             assert page.locator('#runBtn').is_disabled()
             page.locator('#eluCleanupConfirmed').check()
             assert page.locator('#runBtn').is_enabled()
@@ -288,3 +293,65 @@ def test_reference_reads_are_bounded_and_append_all_batches(setup,monkeypatch):
  fetched_before=len(setup['fetched'])
  cached,again=auto_reference.prepare(elu,rows,lambda *args:(_ for _ in ()).throw(AssertionError('Should reuse existing crop')),module.suggest_field,module.normalize_polygon_gdf)
  assert cached==folder and again['token']==meta['token']
+
+
+def test_land_cover_upload_requires_category_review_and_can_be_removed(setup):
+    from werkzeug.serving import make_server
+    from playwright.sync_api import sync_playwright
+    server=make_server('127.0.0.1',0,module.app,threaded=True)
+    threading.Thread(target=server.serve_forever,daemon=True).start()
+    try:
+        with sync_playwright() as p:
+            browser=p.chromium.launch(**({'executable_path':__import__('os').environ['PLAYWRIGHT_CHROMIUM_EXECUTABLE']} if __import__('os').environ.get('PLAYWRIGHT_CHROMIUM_EXECUTABLE') else {}))
+            page=browser.new_page(viewport={'width':390,'height':900})
+            page.goto(f'http://127.0.0.1:{server.server_port}/harmonizer')
+            upload={'name':'elu.zip','mimeType':'application/zip','buffer':setup['raw']}
+            page.locator('[name=elu_zip]').set_input_files(upload)
+            page.wait_for_function("!document.querySelector('#runBtn').disabled",timeout=20000)
+            page.locator('[name=landcover_zip]').set_input_files({**upload,'name':'landcover.zip'})
+            page.locator('#eluMapRows select').first.wait_for(timeout=20000)
+            assert page.locator('#runBtn').is_disabled()
+            page.locator('#eluMapRows select').first.select_option('AGR');page.locator('#eluReviewed').check()
+            assert page.locator('#runBtn').is_enabled()
+            page.locator('#outputMunicipality').fill('Custom municipality')
+            page.locator('.landcover-upload button').click()
+            page.wait_for_function("!document.querySelector('#runBtn').disabled",timeout=20000)
+            assert page.locator('#eluMapBox').is_hidden()
+            assert page.locator('#outputMunicipality').input_value()=='Custom municipality'
+            assert 'Custom_municipality_NPAAAD_SAFDZ' in page.locator('#filenamePreview').inner_text()
+            browser.close()
+    finally:server.shutdown()
+
+
+def test_land_cover_cannot_bypass_review(setup):
+    client=module.app.test_client()
+    response=client.post('/process_start',data={'landcover_zip':upload(setup['raw'])},content_type='multipart/form-data')
+    assert response.status_code==400
+    assert 'reviewed all ELU categories' in response.json['error']
+
+
+def test_browser_reconnects_to_existing_job_after_reload(setup):
+    from werkzeug.serving import make_server
+    from playwright.sync_api import sync_playwright
+    server=make_server('127.0.0.1',0,module.app,threaded=True)
+    threading.Thread(target=server.serve_forever,daemon=True).start()
+    try:
+        with sync_playwright() as p:
+            browser=p.chromium.launch(**({'executable_path':__import__('os').environ['PLAYWRIGHT_CHROMIUM_EXECUTABLE']} if __import__('os').environ.get('PLAYWRIGHT_CHROMIUM_EXECUTABLE') else {}))
+            page=browser.new_page();page.goto(f'http://127.0.0.1:{server.server_port}/harmonizer')
+            jobid='a'*32
+            state={'status':'complete','percent':100,'download_name':'Restored_NPAAAD_SAFDZ_Harmonize_Agricultural_Zones.zip','result_summary':{'features':3,'area_ha':12.5,'gray_features':1,'fallback_decisions':2}}
+            attempts=[]
+            def progress(route):
+                attempts.append(1)
+                if len(attempts)==1:route.abort('connectionclosed')
+                else:route.fulfill(json=state)
+            page.route('**/progress/'+jobid,progress)
+            page.evaluate('(id)=>sessionStorage.setItem("harmonizer-active-job",id)',jobid)
+            page.reload();page.locator('#downloadBtn').wait_for(timeout=15000)
+            assert len(attempts)==2
+            assert 'Restored_NPAAAD_SAFDZ' in page.locator('#resultSummary').inner_text()
+            assert '3 output features' in page.locator('#resultSummary').inner_text()
+            assert page.locator('[name=elu_zip]').is_enabled()
+            browser.close()
+    finally:server.shutdown()

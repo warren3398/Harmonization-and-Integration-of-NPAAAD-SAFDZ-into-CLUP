@@ -13,7 +13,7 @@
   const update=text=>{if(link.href===address&&step)step.textContent=text;};
   link.setAttribute('aria-disabled','true');
   try{
-   let file;
+   let file,filename='HARMONIZATION_RESULTS.zip';
    for(let attempt=1;attempt<=3;attempt++){
     link.textContent=attempt===1?'Downloading results…':`Retrying download… (${attempt}/3)`;
     update(attempt===1?'Receiving your results. Keep this page open.':'Connection interrupted. Retrying the download automatically…');
@@ -35,6 +35,10 @@
      if(expected>0&&!response.headers.get('content-encoding')&&blob.size!==expected)throw Error('The file transfer was incomplete.');
      const signature=new Uint8Array(await blob.slice(0,4).arrayBuffer());
      if(signature[0]!==80||signature[1]!==75||!((signature[2]===3&&signature[3]===4)||(signature[2]===5&&signature[3]===6)))throw Error('The received file is incomplete or is not a valid ZIP.');
+     const disposition=response.headers.get('content-disposition')||'';
+     const utf=disposition.match(/filename\*=UTF-8''([^;]+)/i),plain=disposition.match(/filename="([^"]+)"|filename=([^;]+)/i);
+     try{filename=utf?decodeURIComponent(utf[1]):plain?(plain[1]||plain[2]).trim():link.dataset.filename||filename;}catch{filename=link.dataset.filename||filename;}
+     filename=filename.replace(/[\\/\x00-\x1f]/g,'_');
      file=blob;break;
     }catch(error){
      if(error.permanent||attempt===3)throw error;
@@ -42,7 +46,7 @@
     }finally{clearTimeout(timeout);}
    }
    const objectUrl=URL.createObjectURL(file);
-   const save=document.createElement('a');save.href=objectUrl;save.download='HARMONIZATION_RESULTS.zip';save.hidden=true;
+   const save=document.createElement('a');save.href=objectUrl;save.download=filename;save.hidden=true;
    document.body.append(save);save.click();save.remove();setTimeout(()=>URL.revokeObjectURL(objectUrl),60000);
    update('Download started. Check your browser downloads.');
   }catch(error){

@@ -827,6 +827,8 @@ def inspect_layers():
         if result.get('_elu_cleanup',{}).get('requires_review'):
             result['_crs_summary']={'master_ok':False,'master_crs':None,'error':'Resolve ELU overlaps or missing classes before reference detection.'}
             return jsonify(result)
+        from workspace_ux import suggest_municipality
+        if elu is not None: result['_municipality']=suggest_municipality(elu)
         paths={}
         if automatic:
             import auto_reference
@@ -1154,7 +1156,9 @@ def run_background(job_id, job, uploads, fields, elu_mapping):
                     for q in pdir.iterdir(): pz.write(q,q.name)
                 z.write(pzip,pzip.name)
             qa_json=out_dir/'QA_QC.json'; qa_json.write_text(json.dumps(qa,indent=2),encoding='utf-8'); z.write(qa_json,qa_json.name)
-        set_job(job_id,status='complete',percent=100,step='Processing Complete',elapsed=int(time.time()-started),bundle=str(bundle))
+        summary=dict(JOBS.get(job_id,{}).get('result_summary',{}))
+        summary.update({'features':qa['Final']['features'],'area_ha':qa['Final']['total_area_ha'],'gray_features':style_report['unmapped_features'],'fallback_decisions':fallback_count})
+        set_job(job_id,status='complete',percent=100,step='Processing Complete',elapsed=int(time.time()-started),bundle=str(bundle),result_summary=summary)
     except Exception as e:
         set_job(job_id,status='error',percent=JOBS.get(job_id,{}).get('percent',0),step='Processing Failed',elapsed=int(time.time()-started),error=str(e),details=traceback.format_exc())
 
@@ -1192,10 +1196,11 @@ def process_start():
         return jsonify({'error':'Another ELU reference detection or GIS generation is running. Please wait.','busy':True}),409
     try:
         runtime_limits.cleanup();runtime_limits.ensure_space()
-        if request.form.get('elu_reviewed')!='yes':
+        has_landcover=bool(request.files.get('landcover_zip') and request.files['landcover_zip'].filename)
+        if has_landcover and request.form.get('elu_reviewed')!='yes':
             raise ValueError('Confirm that you reviewed all ELU categories, including Other / Ignore.')
         try:
-            elu_mapping=validate_elu_mapping(json.loads(request.form.get('elu_mapping','{}') or '{}'))
+            elu_mapping=validate_elu_mapping(json.loads(request.form.get('elu_mapping','{}') or '{}')) if has_landcover else {}
         except (json.JSONDecodeError,TypeError):
             raise ValueError('Invalid ELU mapping. Inspect the files again and review all categories.')
         automatic=request.form.get('reference_mode')=='auto'
@@ -1224,6 +1229,9 @@ def process_start():
             raise ValueError('Resolve ELU overlaps or missing classifications before generation. Review the geometry report.')
         if cleanup_report['requires_change_confirmation'] and request.form.get('elu_cleanup_confirmed')!='yes':
             raise ValueError('Confirm the gap filling and/or class-priority changes before generation.')
+        if not has_landcover:
+            from workspace_ux import default_mapping
+            elu_mapping=default_mapping(elu[cleanup_field])
         review_path=job/'ELU_GEOMETRY_REVIEW.gpkg'
         shutil.copyfile(analysis_path,review_path)
         uploads['_elu_cleaned_path']=review_path
@@ -1240,7 +1248,8 @@ def process_start():
             for role,key in chosen.items(): uploads[role+'_gpkg']=r2_download(key,up/(role+'.gpkg'))
         fields={role:request.form.get(role+'_field',default).strip() for role,default in
                 [('elu','ELU'),('clup','CLUP'),('npaaad','NPAAAD'),('safdz','SAFDZ'),('landcover','CLASS')]}
-        set_job(job_id,status='queued',percent=0,step='Preparing data',elapsed=0)
+        from workspace_ux import download_name
+        set_job(job_id,status='queued',percent=0,step='Preparing data',elapsed=0,download_name=download_name(request.form.get('output_municipality')),result_summary={'elu_features':len(elu),'land_cover_included':has_landcover,'reference_mode':'automatic' if automatic else 'manual'})
         del elu
         threading.Thread(target=run_background_guarded,args=(job_id,job,uploads,fields,elu_mapping),daemon=True).start()
         handed_off=True
@@ -1263,7 +1272,7 @@ def job_download(job_id):
     data=stored_job(job_id)
     if data.get('expired'):return jsonify({'error':data['error']}),410
     if data.get('status')!='complete' or not data.get('bundle'): return jsonify({'error':'Results are not ready.'}),409
-    return send_file(data['bundle'],as_attachment=True,download_name='HARMONIZATION_RESULTS.zip')
+    return send_file(data['bundle'],as_attachment=True,download_name=data.get('download_name','HARMONIZATION_RESULTS.zip'))
 
 if __name__ == '__main__':
     port=int(os.environ.get('PORT','5055')); app.run(host='127.0.0.1',port=port,debug=False,use_reloader=False,threaded=True)

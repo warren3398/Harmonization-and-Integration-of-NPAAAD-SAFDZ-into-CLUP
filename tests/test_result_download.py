@@ -54,3 +54,10 @@ def test_incomplete_zip_is_retried(browser_page,tmp_path):
  with page.expect_download() as saved:page.locator('#downloadBtn').click()
  file=tmp_path/'results.zip';saved.value.save_as(file)
  assert file.read_bytes()==content and len(attempts)==2
+
+
+def test_download_honors_server_municipality_filename(browser_page):
+ page=browser_page
+ page.route('**/download/sample',lambda route:route.fulfill(content_type='application/zip',headers={'Content-Disposition':"attachment; filename*=UTF-8''San_Jos%C3%A9_NPAAAD_SAFDZ_Harmonize_Agricultural_Zones.zip"},body=payload()))
+ with page.expect_download() as saved:page.locator('#downloadBtn').click()
+ assert saved.value.suggested_filename=='San_José_NPAAAD_SAFDZ_Harmonize_Agricultural_Zones.zip'
