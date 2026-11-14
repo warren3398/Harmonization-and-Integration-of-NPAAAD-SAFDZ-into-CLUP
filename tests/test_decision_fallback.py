@@ -11,11 +11,12 @@ def test_nulls_and_blanks_use_exact_elu_description_and_keep_existing_rules():
  assert fill_missing_decisions(frame)==6
  assert frame.Decision.tolist()==classes[:6]+['Ask LGU','BU','do not harmonize']
 
-def test_export_keeps_gray_fallback_and_nonempty_decisions(tmp_path):
+def test_export_keeps_additional_class_names_colors_and_nonempty_decisions(tmp_path):
  frame=gpd.GeoDataFrame({'ELU_CLS':['Cemetery','Institutional','Residential'],'Decision':[None,'','BU']},geometry=[box(i,0,i+1,1) for i in range(3)],crs=32651)
  fill_missing_decisions(frame)
  styled,_=apply_palette(frame)
- assert styled.LU_HEX.tolist()==['#D9D9D9','#D9D9D9','#FFFF00']
+ assert styled.LU_HEX.tolist()==['#607D8B','#1565C0','#FFFF00']
+ assert styled.LU_STYLE.tolist()==['Cemetery','Institutional','Residential']
  path=tmp_path/'result.shp';styled.to_file(path,index=False)
  result=gpd.read_file(path)
  assert result.Decision.tolist()==['Cemetery','Institutional','BU']

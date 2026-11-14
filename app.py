@@ -1136,7 +1136,7 @@ def run_background(job_id, job, uploads, fields, elu_mapping):
         styled_union,style_report=apply_palette(union2,internal['elu'])
         qa['Land_use_style']=style_report
         shp_path=shp_dir/'HARMONIZED_UNION.shp'; styled_union.to_file(shp_path,encoding='UTF-8',index=False)
-        write_styles(shp_path)
+        write_styles(shp_path,style_report['palette'])
         runtime_limits.ensure_space(sum(path.stat().st_size for path in shp_dir.iterdir() if path.is_file())+1024*1024)
         shp_zip=out_dir/'HARMONIZED_UNION.zip'
         with zipfile.ZipFile(shp_zip,'w',zipfile.ZIP_DEFLATED) as z:
@@ -1157,7 +1157,7 @@ def run_background(job_id, job, uploads, fields, elu_mapping):
                 z.write(pzip,pzip.name)
             qa_json=out_dir/'QA_QC.json'; qa_json.write_text(json.dumps(qa,indent=2),encoding='utf-8'); z.write(qa_json,qa_json.name)
         summary=dict(JOBS.get(job_id,{}).get('result_summary',{}))
-        summary.update({'features':qa['Final']['features'],'area_ha':qa['Final']['total_area_ha'],'gray_features':style_report['unmapped_features'],'fallback_decisions':fallback_count})
+        summary.update({'features':qa['Final']['features'],'area_ha':qa['Final']['total_area_ha'],'gray_features':style_report['missing_class_features'],'additional_color_features':style_report['additional_features'],'fallback_decisions':fallback_count})
         set_job(job_id,status='complete',percent=100,step='Processing Complete',elapsed=int(time.time()-started),bundle=str(bundle),result_summary=summary)
     except Exception as e:
         set_job(job_id,status='error',percent=JOBS.get(job_id,{}).get('percent',0),step='Processing Failed',elapsed=int(time.time()-started),error=str(e),details=traceback.format_exc())

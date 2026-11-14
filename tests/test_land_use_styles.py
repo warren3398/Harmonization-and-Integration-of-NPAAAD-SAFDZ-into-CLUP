@@ -25,16 +25,18 @@ def test_aliases_and_unknown_or_mixed_classes():
  assert category('Mineral Land')=='Mining / Quarrying'
  assert category('Protection Forest')=='Forest'
  assert category('Parks and Recreation')=='Parks / Recreation'
- for value in ['BU','Institutional','Cemetery','Infrastructure/Utilities, Transportation and Services','Residential / Commercial','']:
-  assert category(value)=='Gray'
+ for value in ['BU','Institutional','Cemetery','Infrastructure/Utilities, Transportation and Services','Residential / Commercial']:
+  assert category(value)==value
+ assert category('')==FALLBACK[0]
 
 def test_shapefile_and_sidecar_styles_preserve_exact_palette(tmp_path):
  data=gpd.GeoDataFrame({'ELU_CLS':list(EXPECTED)+['BU']},geometry=[box(i,0,i+1,1) for i in range(12)],crs=32651)
  styled,report=apply_palette(data)
  path=tmp_path/'HARMONIZED_UNION.shp';styled.to_file(path,index=False,encoding='UTF-8');write_styles(path)
  loaded=gpd.read_file(path)
- assert list(loaded.LU_HEX)==list(EXPECTED.values())+[FALLBACK[2]]
- assert loaded.iloc[-1].LU_STYLE=='Gray'
+ assert list(loaded.LU_HEX)==list(EXPECTED.values())+[report['palette']['BU']]
+ assert loaded.iloc[-1].LU_STYLE=='BU'
+ assert report['palette']['BU'] not in set(EXPECTED.values())|{FALLBACK[2]}
  qml=ET.parse(path.with_suffix('.qml')).getroot()
  renderer=qml.find('renderer-v2');assert renderer.attrib['attr']=='LU_STYLE'
  categories={row.attrib['value']:row.attrib['symbol'] for row in renderer.find('categories')}
@@ -47,7 +49,52 @@ def test_shapefile_and_sidecar_styles_preserve_exact_palette(tmp_path):
  for rule in sld.findall('.//sld:Rule',ns):
   name=rule.find('sld:Name',ns).text
   color=rule.find(".//sld:CssParameter[@name='fill']",ns).text
-  assert color==dict(EXPECTED,Gray=FALLBACK[2])[name]
+  assert color==report['palette'][name]
  with (tmp_path/'LAND_USE_PALETTE.csv').open() as f:
-  rows=list(csv.DictReader(f));assert {r['Land Use Classification']:r['HEX'] for r in rows}==EXPECTED
- assert report['unmapped_values']==['BU']
+  rows=list(csv.DictReader(f));assert {r['Land Use Classification']:r['HEX'] for r in rows}==report['palette']
+ assert report['unmapped_values']==[]
+ assert set(report['additional_classes'])=={'BU'}
+
+
+def test_additional_classes_keep_exact_names_distinct_colors_and_order_stability():
+ names=['Cemetery','Institutional','Infrastructure/Utilities Transportation and Services','Unlisted zone α','Residential / Commercial','BU']
+ original=gpd.GeoDataFrame({'ELU_CLS':names+names,'Decision':['Ask LGU']*(2*len(names))},geometry=[box(i,0,i+1,1) for i in range(2*len(names))],crs=32651)
+ styled,report=apply_palette(original)
+ assert styled.LU_STYLE.tolist()==original.ELU_CLS.tolist()
+ assert styled.Decision.equals(original.Decision) and styled.geometry.equals(original.geometry)
+ colors=report['additional_classes']
+ assert len(set(colors.values()))==len(names)
+ assert not set(colors.values()) & (set(EXPECTED.values())|{FALLBACK[2]})
+ assert styled.groupby('ELU_CLS').LU_HEX.nunique().eq(1).all()
+ _,reverse=apply_palette(original.iloc[::-1])
+ assert colors==reverse['additional_classes']
+ assert report['additional_features']==len(original) and report['unmapped_features']==0
+
+
+def test_extra_classes_are_in_every_exported_style_and_palette(tmp_path):
+ names=['Cemetery','Institutional','Infrastructure/Utilities Transportation and Services','New & Special <Zone>']
+ frame=gpd.GeoDataFrame({'ELU_CLS':names},geometry=[box(i,0,i+1,1) for i in range(len(names))],crs=32651)
+ styled,report=apply_palette(frame);path=tmp_path/'result.shp';styled.to_file(path,index=False)
+ write_styles(path,report['palette'])
+ qml=ET.parse(path.with_suffix('.qml')).getroot()
+ categories={row.attrib['value']:row.attrib['symbol'] for row in qml.findall('.//category')}
+ symbols={row.attrib['name']:row for row in qml.findall('.//symbols/symbol')}
+ ns={'sld':'http://www.opengis.net/sld','ogc':'http://www.opengis.net/ogc'}
+ rules={rule.find('sld:Name',ns).text:rule for rule in ET.parse(path.with_suffix('.sld')).findall('.//sld:Rule',ns)}
+ with (tmp_path/'LAND_USE_PALETTE.csv').open() as f:csv_colors={r['Land Use Classification']:r['HEX'] for r in csv.DictReader(f)}
+ for name in names:
+  color=report['palette'][name]
+  options={o.attrib['name']:o.attrib['value'] for o in symbols[categories[name]].find('layer/Option')}
+  assert options['color']==','.join(map(str,(*rgb(color),255)))
+  assert rules[name].find(".//sld:CssParameter[@name='fill']",ns).text==color
+  assert csv_colors[name]==color
+ loaded=gpd.read_file(path)
+ assert loaded.LU_STYLE.tolist()==names
+
+
+def test_only_empty_classifications_use_neutral_gray():
+ frame=gpd.GeoDataFrame({'ELU_CLS':[None,'','Cemetery']},geometry=[box(i,0,i+1,1) for i in range(3)],crs=32651)
+ styled,report=apply_palette(frame)
+ assert styled.LU_HEX.tolist()[:2]==[FALLBACK[2]]*2
+ assert styled.LU_STYLE.tolist()[2]=='Cemetery'
+ assert report['missing_class_features']==2 and report['additional_features']==1
