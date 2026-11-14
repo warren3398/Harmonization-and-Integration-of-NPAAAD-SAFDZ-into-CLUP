@@ -18,7 +18,7 @@ PALETTE = [
     ('Tourism','Orange','#FF6600'),
     ('Water Uses','Light Blue','#AFD7E6'),
 ]
-FALLBACK = ('Unmapped','Gray','#D9D9D9')
+FALLBACK = ('Gray','Gray','#D9D9D9')
 RULES = {
     'Residential':r'\b(residential|res|r[123])\b',
     'Commercial':r'\b(commercial|com|c[123])\b',
@@ -60,9 +60,9 @@ def apply_palette(frame, source_field='ELU_CLS'):
     result['LU_HEX']=result['LU_STYLE'].map(colors)
     for index,channel in enumerate(('LU_R','LU_G','LU_B')):
         result[channel]=result['LU_HEX'].map(lambda color:rgb(color)[index]).astype('int32')
-    unknown=sorted(set(values[result['LU_STYLE'].eq('Unmapped')]))
+    unknown=sorted(set(values[result['LU_STYLE'].eq(FALLBACK[0])]))
     return result,{'source_field':source_field,'style_field':'LU_STYLE','unmapped_values':unknown,
-                   'unmapped_features':int(result['LU_STYLE'].eq('Unmapped').sum()),
+                   'unmapped_features':int(result['LU_STYLE'].eq(FALLBACK[0]).sum()),
                    'fallback_color':FALLBACK[2],'palette':dict((name,color) for name,_,color in PALETTE)}
 
 
@@ -108,5 +108,5 @@ def write_styles(shapefile):
         'Other GIS software: import the SLD if supported, or symbolize LU_STYLE using LAND_USE_PALETTE.csv.\n'
         'LU_HEX and LU_R/LU_G/LU_B also record the exact requested colors in each feature.\n\n'
         'Default colors use the original ELU classification (ELU_CLS). Original classes and Decision values are retained.\n'
-        'Unknown, mixed, or broad classes such as BU are shown in neutral gray (Unmapped); they are not guessed as Residential.\n'
+        'Unknown, mixed, or broad classes such as BU are shown in neutral gray (Gray); they are not guessed as Residential.\n'
         'The .shp format itself does not embed display styles; keep the accompanying style files.\n',encoding='utf-8')

@@ -1092,6 +1092,9 @@ def run_background(job_id, job, uploads, fields, elu_mapping):
             return ''
 
         union2['Decision']=union2.apply(decide,axis=1)
+        from decision_fallback import fill_missing_decisions
+        fallback_count=fill_missing_decisions(union2,internal['elu'])
+        qa['Decision_fallback']={'features_filled_from_ELU_CLS':fallback_count,'existing_rule_decisions_preserved':True}
         union2['AREA_HA']=(union2.geometry.area/10000.0).round(3)
         u=union2.copy()
         required=[internal['elu'],internal['npaaad'],internal['safdz']]

@@ -26,7 +26,7 @@ def test_aliases_and_unknown_or_mixed_classes():
  assert category('Protection Forest')=='Forest'
  assert category('Parks and Recreation')=='Parks / Recreation'
  for value in ['BU','Institutional','Cemetery','Infrastructure/Utilities, Transportation and Services','Residential / Commercial','']:
-  assert category(value)=='Unmapped'
+  assert category(value)=='Gray'
 
 def test_shapefile_and_sidecar_styles_preserve_exact_palette(tmp_path):
  data=gpd.GeoDataFrame({'ELU_CLS':list(EXPECTED)+['BU']},geometry=[box(i,0,i+1,1) for i in range(12)],crs=32651)
@@ -34,7 +34,7 @@ def test_shapefile_and_sidecar_styles_preserve_exact_palette(tmp_path):
  path=tmp_path/'HARMONIZED_UNION.shp';styled.to_file(path,index=False,encoding='UTF-8');write_styles(path)
  loaded=gpd.read_file(path)
  assert list(loaded.LU_HEX)==list(EXPECTED.values())+[FALLBACK[2]]
- assert loaded.iloc[-1].LU_STYLE=='Unmapped'
+ assert loaded.iloc[-1].LU_STYLE=='Gray'
  qml=ET.parse(path.with_suffix('.qml')).getroot()
  renderer=qml.find('renderer-v2');assert renderer.attrib['attr']=='LU_STYLE'
  categories={row.attrib['value']:row.attrib['symbol'] for row in renderer.find('categories')}
@@ -47,7 +47,7 @@ def test_shapefile_and_sidecar_styles_preserve_exact_palette(tmp_path):
  for rule in sld.findall('.//sld:Rule',ns):
   name=rule.find('sld:Name',ns).text
   color=rule.find(".//sld:CssParameter[@name='fill']",ns).text
-  assert color==dict(EXPECTED,Unmapped=FALLBACK[2])[name]
+  assert color==dict(EXPECTED,Gray=FALLBACK[2])[name]
  with (tmp_path/'LAND_USE_PALETTE.csv').open() as f:
   rows=list(csv.DictReader(f));assert {r['Land Use Classification']:r['HEX'] for r in rows}==EXPECTED
  assert report['unmapped_values']==['BU']
