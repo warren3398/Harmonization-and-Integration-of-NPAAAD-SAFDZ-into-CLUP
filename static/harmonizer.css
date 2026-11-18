@@ -199,7 +199,7 @@
 .harmonizer-page .dataset-title h3 { font-size: 16px; }
 .harmonizer-page .elu-upload strong, .harmonizer-page .landcover-upload label,
 .harmonizer-page .output-naming label { font-size: 15px; }
-.harmonizer-page .hint, .harmonizer-page .upload-description, .harmonizer-page .upload-formats,
+.harmonizer-page .hint, .harmonizer-page .section-heading .hint, .harmonizer-page .upload-description, .harmonizer-page .upload-formats,
 .harmonizer-page .reference-detection p, .harmonizer-page #runHint, .harmonizer-page #filenamePreview,
 .harmonizer-page .help-intro, .harmonizer-page .output-item p, .harmonizer-page .help-tip p { font-size: 14px; }
 .harmonizer-page .reference-detection strong, .harmonizer-page .output-item h3,
