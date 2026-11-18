@@ -1,20 +1,12 @@
 <!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>NPAAAD/SAFDZ–CLUP Harmonization</title><link rel="stylesheet" href="/static/style.css"><link rel="stylesheet" href="/static/harmonizer.css?v=7"></head>
+<title>NPAAAD/SAFDZ–CLUP Harmonization</title><link rel="stylesheet" href="/static/style.css"><link rel="stylesheet" href="/static/harmonizer.css?v=8"></head>
 <body class="harmonizer-page">
-<header class="harmonizer-masthead">
-  <div class="masthead-inner">
-    <a class="masthead-brand" href="{{ url_for('portal_home') }}">
-      <img src="/static/assets/land-use-layers.png" alt="" width="40" height="40">
-      <span>ALMED GIS Tools Portal</span>
-    </a>
-    <nav aria-label="Workspace navigation">
-      <a href="{{ url_for('portal_home') }}#applications">All applications</a>
-      <a href="{{ url_for('logout') }}">Logout</a>
-    </nav>
-  </div>
-</header>
 <main>
+  <nav class="workspace-links" aria-label="Workspace navigation">
+    <a href="{{ url_for('portal_home') }}#applications">‹ All applications</a>
+    <a href="{{ url_for('logout') }}">Logout</a>
+  </nav>
   <section class="hero" aria-labelledby="harmonizer-title">
     <div class="hero-copy">
       <p class="hero-eyebrow">Land use harmonization</p>

@@ -130,16 +130,10 @@
 
 /* Shared portal identity and a compact workflow header. */
 .harmonizer-page { background: #eaf3ed; }
-.harmonizer-page .harmonizer-masthead { background: #062e2b; color: #fff; }
-.harmonizer-page .masthead-inner,
-.harmonizer-page main { width: min(100% - 56px, 1240px); margin-inline: auto; }
-.harmonizer-page .masthead-inner { min-height: 64px; display: flex; align-items: center; justify-content: space-between; gap: 14px; }
-.harmonizer-page .masthead-brand { display: flex; align-items: center; gap: 10px; color: #fff; font-weight: 750; font-size: 17px; text-decoration: none; }
-.harmonizer-page .masthead-brand img { flex: 0 0 auto; }
-.harmonizer-page .masthead-inner nav { display: flex; align-items: center; gap: 10px; }
-.harmonizer-page .masthead-inner nav a { color: #e5f1ec; font-size: 13px; text-decoration: none; padding: 7px 9px; }
-.harmonizer-page .masthead-inner nav a:hover { text-decoration: underline; }
-.harmonizer-page main { padding: 20px 0 24px; }
+.harmonizer-page main { width: min(100% - 56px, 1240px); margin-inline: auto; padding: 12px 0 24px; }
+.harmonizer-page .workspace-links { display: flex; justify-content: space-between; gap: 12px; padding-bottom: 11px; }
+.harmonizer-page .workspace-links a { padding: 5px 0; color: #164f38; font-size: 15px; font-weight: 700; text-decoration: none; }
+.harmonizer-page .workspace-links a:hover { text-decoration: underline; }
 .harmonizer-page .hero {
   background: linear-gradient(90deg, #092f28 0%, #092f28f7 29%, #092f28dc 42%, #092f285c 66%, #092f2808 100%),
     url("assets/portal-harmonizer.webp") right 45% / auto 265% no-repeat, #092f28;
@@ -147,8 +141,8 @@
   min-height: 224px; border-radius: 18px; box-shadow: 0 6px 18px #113c2c24;
 }
 .harmonizer-page .hero-copy { max-width: 670px; }
-.harmonizer-page .hero h1 { color: #fff; margin: 0 0 12px; font-size: clamp(31px, 4.2vw, 52px); font-weight: 750; line-height: 1.04; }
-.harmonizer-page .hero p { margin: 0; max-width: 438px; color: #e7f4eb; font-size: 15px; }
+.harmonizer-page .hero h1 { color: #fff; margin: 0 0 12px; font-size: clamp(33px, 4.5vw, 56px); font-weight: 750; line-height: 1.04; }
+.harmonizer-page .hero p { margin: 0; max-width: 490px; color: #e7f4eb; font-size: 17px; }
 .harmonizer-page .hero .hero-eyebrow { margin-bottom: 11px; color: #bceb91; font-size: 11px; letter-spacing: .11em; text-transform: uppercase; font-weight: 750; }
 .harmonizer-page .steps {
   display: grid; counter-reset: step; grid-template-columns: repeat(3, minmax(0, 1fr));
@@ -156,7 +150,7 @@
 }
 .harmonizer-page .steps li {
   display: flex; align-items: center; gap: 9px; color: #35574a; background: #f7fbf8; border: 1px solid #d0e4d7;
-  border-radius: 10px; margin: 0; padding: 10px 12px; font-size: 13px; font-weight: 700;
+  border-radius: 10px; margin: 0; padding: 10px 12px; font-size: 14px; font-weight: 700;
 }
 .harmonizer-page .steps li::before {
   counter-increment: step; content: counter(step); position: static; display: grid; place-items: center;
@@ -175,20 +169,17 @@
 .harmonizer-page .optional-layers, .harmonizer-page .method-rules { background: #f8fbf8; }
 .harmonizer-page .workspace-footer { border-top-color: #cbded1; }
 @media (max-width: 760px) {
-  .harmonizer-page .masthead-inner, .harmonizer-page main { width: calc(100% - 32px); }
+  .harmonizer-page main { width: calc(100% - 32px); }
   .harmonizer-page .workspace-layout { grid-template-columns: minmax(0, 1fr); }
   .harmonizer-page .workspace-help { position: static; }
 }
 @media (max-width: 480px) {
   .harmonizer-page main { padding-top: 13px; }
-  .harmonizer-page .masthead-inner { flex-wrap: wrap; gap: 2px; padding-block: 6px; }
-  .harmonizer-page .masthead-brand { font-size: 15px; }
-  .harmonizer-page .masthead-inner nav a { font-size: 12px; padding-block: 4px; }
   .harmonizer-page .hero { min-height: 198px; background-size: auto, auto 220%; }
-  .harmonizer-page .hero h1 { font-size: clamp(26px, 7.5vw, 36px); }
-  .harmonizer-page .hero p { font-size: 13px; }
+  .harmonizer-page .hero h1 { font-size: clamp(28px, 8vw, 38px); }
+  .harmonizer-page .hero p { font-size: 15px; }
   .harmonizer-page .steps { gap: 5px; }
-  .harmonizer-page .steps li { gap: 5px; padding: 7px 5px; font-size: 10px; }
+  .harmonizer-page .steps li { gap: 5px; padding: 7px 5px; font-size: 11px; }
   .harmonizer-page .steps li::before { width: 20px; height: 20px; flex-basis: 20px; }
 }
 
@@ -202,3 +193,15 @@
 .harmonizer-page .help-tip p { color: #365446; }
 .harmonizer-page .help-intro,
 .harmonizer-page .output-item p { font-size: 12px; }
+
+
+.harmonizer-page .section-heading h2 { font-size: clamp(19px, 2.4vw, 24px); }
+.harmonizer-page .dataset-title h3 { font-size: 16px; }
+.harmonizer-page .elu-upload strong, .harmonizer-page .landcover-upload label,
+.harmonizer-page .output-naming label { font-size: 15px; }
+.harmonizer-page .hint, .harmonizer-page .upload-description, .harmonizer-page .upload-formats,
+.harmonizer-page .reference-detection p, .harmonizer-page #runHint, .harmonizer-page #filenamePreview,
+.harmonizer-page .help-intro, .harmonizer-page .output-item p, .harmonizer-page .help-tip p { font-size: 14px; }
+.harmonizer-page .reference-detection strong, .harmonizer-page .output-item h3,
+.harmonizer-page details summary { font-size: 16px; }
+.harmonizer-page input[type="file"], .harmonizer-page button[type="submit"] { font-size: 15px; }
