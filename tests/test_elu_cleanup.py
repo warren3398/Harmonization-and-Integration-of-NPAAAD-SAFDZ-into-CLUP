@@ -87,11 +87,11 @@ def test_geographic_inputs_measure_tolerance_in_square_metres():
     with pytest.raises(ValueError):elu_cleanup.options({'elu_gap_max_m2':'nan'})
 
 
-def test_server_blocks_unreviewed_conflicts_and_publishes_review(tmp_path,monkeypatch):
+def test_server_blocks_unreviewed_conflicts_and_publishes_review(tmp_path,monkeypatch, authenticated_client):
     monkeypatch.setattr(module,'WORK_ROOT',tmp_path/'jobs');module.WORK_ROOT.mkdir()
     data=frame(['AGR','BU'],[box(500000,1500000,500010,1500010),box(500005,1500000,500015,1500010)])
     raw=zipped(tmp_path,data)
-    client=module.app.test_client()
+    client=authenticated_client(module.app)
     inspected=client.post('/inspect',data={'reference_mode':'auto','elu_zip':(io.BytesIO(raw),'elu.zip')})
     assert inspected.status_code==200,inspected.json
     report=inspected.json['_elu_cleanup']
@@ -105,11 +105,11 @@ def test_server_blocks_unreviewed_conflicts_and_publishes_review(tmp_path,monkey
     assert attempted.status_code==400 and 'Resolve ELU overlaps' in attempted.json['error']
 
 
-def test_change_confirmation_is_enforced_on_server(tmp_path,monkeypatch):
+def test_change_confirmation_is_enforced_on_server(tmp_path,monkeypatch, authenticated_client):
     monkeypatch.setattr(module,'WORK_ROOT',tmp_path/'jobs');module.WORK_ROOT.mkdir()
     outer=box(500000,1500000,500020,1500020);hole=box(500002,1500002,500004,1500004)
     raw=zipped(tmp_path,frame(['AGR'],[Polygon(outer.exterior.coords,[hole.exterior.coords])]))
-    response=module.app.test_client().post('/process_start',data={'reference_mode':'auto','elu_zip':(io.BytesIO(raw),'elu.zip'),
+    response=authenticated_client(module.app).post('/process_start',data={'reference_mode':'auto','elu_zip':(io.BytesIO(raw),'elu.zip'),
        'elu_reviewed':'yes','elu_field':'LAND_USE','elu_mapping':json.dumps({'AGR':'AGR'}),'elu_fill_gaps':'yes','elu_gap_max_m2':'10'})
     assert response.status_code==400 and 'Confirm the gap filling' in response.json['error']
 

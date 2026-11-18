@@ -21,7 +21,8 @@ import runtime_limits
 
 app = Flask(__name__)
 app.secret_key = os.environ.get('ALRMS_SESSION_SECRET', os.urandom(32))
-app.config.update(SESSION_COOKIE_HTTPONLY=True, SESSION_COOKIE_SAMESITE='Lax')
+app.config.update(SESSION_COOKIE_HTTPONLY=True, SESSION_COOKIE_SAMESITE='Lax',
+                  SESSION_COOKIE_SECURE=bool(os.environ.get('RENDER')))
 LOGIN_USERNAME = os.environ.get('ALRMS_USERNAME', 'ALRMS')
 DEFAULT_PASSWORD_HASH = 'pbkdf2:sha256:600000$alrms-v27-local$52d29729841c4eb54914bc5b24bea26e44050e1e7e77957f7e5238049d3ce4c5'
 LOGIN_PASSWORD_HASH = os.environ.get('ALRMS_PASSWORD_HASH', DEFAULT_PASSWORD_HASH)
@@ -32,7 +33,7 @@ def login_required(fn):
     @wraps(fn)
     def wrapped(*args, **kwargs):
         if not session.get('logged_in'):
-            if request.path.startswith(('/progress','/process','/inspect')):
+            if request.path.startswith(('/progress', '/process', '/inspect', '/api/gis-status')):
                 return jsonify({'error':'Login required.'}), 401
             return redirect(url_for('login', next=request.path))
         return fn(*args, **kwargs)
@@ -458,6 +459,7 @@ def portal_home():
     return render_template('portal_home.html')
 
 @app.route('/harmonizer')
+@login_required
 def index():
     return render_template('index.html')
 
@@ -731,6 +733,7 @@ def eo79_module():
 
 
 @app.get('/api/gis-status')
+@login_required
 def gis_operation_status():
     return jsonify({'busy':runtime_limits.GIS_LOCK.locked()})
 
@@ -799,6 +802,7 @@ def reference_metadata(path, role):
 
 
 @app.route('/inspect', methods=['POST'])
+@login_required
 @runtime_limits.inspect_guard
 def inspect_layers():
     job=WORK_ROOT/('inspect_'+uuid.uuid4().hex)
@@ -872,6 +876,7 @@ def inspect_layers():
 
 
 @app.route('/elu-review/<token>')
+@login_required
 def elu_review_download(token):
     import elu_cleanup
     try:
@@ -1189,6 +1194,7 @@ def stored_job(job_id):
 
 
 @app.route('/process_start', methods=['POST'])
+@login_required
 def process_start():
     job=None
     handed_off=False
@@ -1262,12 +1268,14 @@ def process_start():
             runtime_limits.release_memory();runtime_limits.GIS_LOCK.release()
 
 @app.route('/progress/<job_id>')
+@login_required
 def job_progress(job_id):
     data=stored_job(job_id)
     if not data: return jsonify({'error':'Job not found'}),404
     data.pop('bundle',None); return jsonify(data)
 
 @app.route('/download/<job_id>')
+@login_required
 def job_download(job_id):
     data=stored_job(job_id)
     if data.get('expired'):return jsonify({'error':data['error']}),410

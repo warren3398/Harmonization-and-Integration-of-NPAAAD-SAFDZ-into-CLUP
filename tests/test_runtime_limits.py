@@ -30,31 +30,31 @@ def test_zip_capacity_is_checked_before_extraction(tmp_path,monkeypatch):
  assert not (tmp_path/'large.shp').exists()
 
 
-def test_busy_inspection_is_rejected_before_parsing_files():
+def test_busy_inspection_is_rejected_before_parsing_files(authenticated_client):
  assert limits.GIS_LOCK.acquire(timeout=10)
  try:
-  client=module.app.test_client()
+  client=authenticated_client(module.app)
   assert client.get('/api/gis-status').json['busy']
   assert client.post('/inspect').status_code==409
   assert client.post('/process_start').status_code==409
  finally:limits.GIS_LOCK.release()
 
 
-def test_completed_job_survives_worker_state_reset(tmp_path,monkeypatch):
+def test_completed_job_survives_worker_state_reset(tmp_path,monkeypatch, authenticated_client):
  monkeypatch.setattr(module,'WORK_ROOT',tmp_path)
  job='d'*32;folder=tmp_path/job;folder.mkdir();bundle=folder/'results.zip';bundle.write_bytes(b'valid stored result')
  (folder/'job_status.json').write_text(json.dumps({'status':'complete','percent':100,'bundle':str(bundle)}))
  module.JOBS.pop(job,None)
- client=module.app.test_client()
+ client=authenticated_client(module.app)
  assert client.get('/progress/'+job).json['status']=='complete'
  assert client.get('/download/'+job).data==b'valid stored result'
 
 
-def test_expired_download_is_a_clear_error_not_a_server_crash(tmp_path):
+def test_expired_download_is_a_clear_error_not_a_server_crash(tmp_path, authenticated_client):
  job='e'*32
  module.JOBS[job]={'status':'complete','percent':100,'bundle':str(tmp_path/'expired.zip')}
  try:
-  client=module.app.test_client()
+  client=authenticated_client(module.app)
   assert client.get('/progress/'+job).json['status']=='error'
   response=client.get('/download/'+job)
   assert response.status_code==410 and 'expired' in response.json['error']

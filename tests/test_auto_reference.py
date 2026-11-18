@@ -110,8 +110,8 @@ def test_no_coverage_and_missing_pair(setup):
         auto_reference.prepare(setup['elu'],rows,setup['download'],module.suggest_field,module.normalize_polygon_gdf)
 
 
-def test_inspect_reuse_and_real_job(setup):
-    client=module.app.test_client()
+def test_inspect_reuse_and_real_job(setup, authenticated_client):
+    client=authenticated_client(module.app)
     response=client.post('/inspect',data={'reference_mode':'auto','elu_zip':upload(setup['raw'])})
     assert response.status_code==200,response.json
     data=response.json
@@ -238,7 +238,7 @@ def test_browser_overlap_priority_and_cleanup_confirmation(setup):
         server.shutdown()
 
 
-def test_gap_filling_refreshes_reference_crop_and_exports_report(setup):
+def test_gap_filling_refreshes_reference_crop_and_exports_report(setup, authenticated_client):
     point=setup['elu'].geometry.iloc[0].representative_point()
     outer=box(point.x-10,point.y-10,point.x+10,point.y+10)
     hole=box(point.x-1,point.y-1,point.x+1,point.y+1)
@@ -248,7 +248,7 @@ def test_gap_filling_refreshes_reference_crop_and_exports_report(setup):
     content=io.BytesIO()
     with zipfile.ZipFile(content,'w') as archive:
         for path in folder.iterdir():archive.write(path,path.name)
-    raw=content.getvalue();client=module.app.test_client()
+    raw=content.getvalue();client=authenticated_client(module.app)
     first=client.post('/inspect',data={'reference_mode':'auto','elu_zip':upload(raw)})
     assert first.status_code==200,first.json
     original_token=first.json['_auto_reference']['token']
@@ -323,8 +323,8 @@ def test_land_cover_upload_requires_category_review_and_can_be_removed(setup):
     finally:server.shutdown()
 
 
-def test_land_cover_cannot_bypass_review(setup):
-    client=module.app.test_client()
+def test_land_cover_cannot_bypass_review(setup, authenticated_client):
+    client=authenticated_client(module.app)
     response=client.post('/process_start',data={'landcover_zip':upload(setup['raw'])},content_type='multipart/form-data')
     assert response.status_code==400
     assert 'reviewed all ELU categories' in response.json['error']
