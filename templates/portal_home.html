@@ -1,8 +1,97 @@
-<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>ALMED GIS Tools</title><style>:root{font-family:system-ui,-apple-system,Segoe UI,sans-serif;color:#173528;background:#f2f6f3}*{box-sizing:border-box}body{margin:0}.head{background:#14583a;color:white;padding:22px max(20px,calc((100vw - 1100px)/2))}.head h1{margin:4px 0;font-size:clamp(22px,3vw,32px)}.head p{margin:0;color:#d4e9dd}main{max-width:1100px;margin:42px auto;padding:0 20px}.intro{margin-bottom:25px;color:#53665c}.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:20px}.card{background:white;border:1px solid #d9e5dc;border-radius:18px;padding:28px;box-shadow:0 5px 24px #153d2710}.tag{font-size:12px;font-weight:700;color:#22774c;letter-spacing:.08em}.card h2{margin:14px 0;font-size:23px}.card p{color:#53665c;line-height:1.6;min-height:85px}.btn{display:inline-block;background:#17643f;color:white;padding:12px 18px;border-radius:9px;text-decoration:none;font-weight:700}.btn:hover{background:#0c472a}footer{max-width:1100px;margin:35px auto;padding:0 20px;color:#73877a;font-size:13px}</style></head><body><header class="head"><h1>ALMED GIS Tools Portal</h1><p>Department of Agriculture · Bureau of Soils and Water Management</p></header><main><h2>GIS Applications</h2><p class="intro">Access GIS applications from this single portal.</p><div class="cards"><section class="card"><span class="tag">LAND USE HARMONIZATION</span><h2>NPAAAD / SAFDZ–CLUP Harmonizer</h2><p>Process ELU, CLUP, NPAAAD and SAFDZ GIS layers. Select provincial datasets from Cloudflare R2 or use manual GIS uploads.</p><a class="btn" href="/harmonizer">Open Harmonizer</a></section><section class="card"><span class="tag">EXECUTIVE ORDER NO. 79</span><h2>EO 79 SAFDZ Map Generator</h2><p>Prepare SAFDZ-related mining no-go zone map outputs using the EO 79 map generator.</p><a class="btn" href="/eo79">Open EO 79 Generator</a></section><section class="card"><span class="tag">TERRAIN ANALYSIS</span><h2>Slope Map Generator</h2><p>Generate slope maps and prepare GIS terrain analysis outputs using the dedicated Slope Map Generator application.</p><a class="btn" href="https://slopemap-generator.onrender.com/" target="_blank" rel="noopener noreferrer">Open Slope Map Generator</a></section>
-<section class="card">
-  <span class="tag">SOIL FERTILITY MAPPING</span>
-  <h2>Soil Fertility Map Generator</h2>
-  <p>Generate soil fertility maps for N, P, K, pH, and organic matter using sample data and BSWM fertility classes. Download GIS layers, reports, and 4K map layouts.</p>
-  <a class="btn" href="https://soil-fertility-gis-api.onrender.com/" target="_blank" rel="noopener noreferrer">Open Soil Fertility Map Generator</a>
-</section>
-<section class="card"><span class="tag">GIS DATA DOWNLOAD</span><h2>NPAAAD / SAFDZ Map Downloader</h2><p>Access and download NPAAAD and SAFDZ map datasets. Cloudflare R2 configuration will be completed separately.</p><a class="btn" href="https://npaaad-safdz-map-downloader.onrender.com/" target="_blank" rel="noopener noreferrer">Open Map Downloader</a></section></div></main><footer>Unified entry point · GIS applications remain independently maintained.</footer></body></html>
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Access the Bureau of Soils and Water Management's ALMED GIS mapping, analysis, and data tools.">
+  <title>ALMED GIS Tools Portal</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='portal.css') }}">
+</head>
+<body id="home">
+  <a class="skip-link" href="#applications">Skip to applications</a>
+  <header class="masthead">
+    <div class="header-inner">
+      <a class="brand" href="#home">
+        <img src="{{ url_for('static', filename='assets/land-use-layers.png') }}" width="60" height="60" alt="">
+        <span><strong>ALMED GIS Tools Portal</strong><small>Department of Agriculture · Bureau of Soils and Water Management</small></span>
+      </a>
+      <nav aria-label="Main navigation">
+        <a class="home-link" href="#home"><span aria-hidden="true">⌂</span> Home</a>
+        <a href="#applications"><span aria-hidden="true">▦</span> Applications</a>
+        <a href="#resources"><span aria-hidden="true">⇩</span> Resources</a>
+        <a href="#about"><span aria-hidden="true">ⓘ</span> About</a>
+      </nav>
+    </div>
+  </header>
+
+  <main>
+    <section class="hero" aria-labelledby="portal-title">
+      <div class="hero-inner">
+        <h1 id="portal-title">ALMED GIS Tools Portal</h1>
+        <p>Geospatial tools for land use harmonization, soil fertility mapping, and agricultural terrain analysis.</p>
+        <div class="hero-links" aria-label="Portal shortcuts">
+          <a href="#applications"><span aria-hidden="true">▦</span> GIS Applications</a>
+          <a href="#harmonization"><span aria-hidden="true">▱</span> Spatial Data Processing</a>
+          <a href="#map-generation"><span aria-hidden="true">▥</span> Map Generation</a>
+          <a href="#resources"><span aria-hidden="true">⇩</span> Data Download</a>
+        </div>
+      </div>
+    </section>
+
+    <section class="applications" id="applications" aria-labelledby="applications-title">
+      <header class="section-heading">
+        <span class="section-icon" aria-hidden="true">▦</span>
+        <div><h2 id="applications-title">GIS Applications</h2><p>Choose an application to get started.</p></div>
+      </header>
+
+      <div class="cards">
+        <article class="card harmonizer" id="harmonization">
+          <div class="card-content">
+            <p class="category">Land Use Harmonization</p>
+            <h3>NPAAAD / SAFDZ–CLUP Harmonizer</h3>
+            <p class="description">Process ELU, CLUP, NPAAAD, and SAFDZ layers using provincial datasets or your own GIS uploads.</p>
+            <a class="button" href="/harmonizer">Open Harmonizer <span aria-hidden="true">›</span></a>
+          </div>
+        </article>
+        <article class="card eo79" id="map-generation">
+          <div class="card-content">
+            <p class="category">Executive Order No. 79</p>
+            <h3>EO 79 SAFDZ<br>Map Generator</h3>
+            <p class="description">Prepare SAFDZ-related mining no-go zone map outputs.</p>
+            <a class="button" href="/eo79">Open EO 79 Generator <span aria-hidden="true">›</span></a>
+          </div>
+        </article>
+        <article class="card slope">
+          <div class="card-content">
+            <p class="category">Terrain Analysis</p>
+            <h3>Slope Map Generator</h3>
+            <p class="description">Generate slope maps and download GIS terrain analysis outputs.</p>
+            <a class="button" href="https://slopemap-generator.onrender.com/" target="_blank" rel="noopener noreferrer">Open Slope Map Generator <span aria-hidden="true">›</span></a>
+          </div>
+        </article>
+        <article class="card wide fertility">
+          <div class="card-content">
+            <p class="category">Soil Fertility Mapping</p>
+            <h3>Soil Fertility Map Generator</h3>
+            <p class="description">Map N, P, K, pH, and organic matter using BSWM fertility classes. Export GIS layers, reports, and 4K map layouts.</p>
+            <a class="button" href="https://soil-fertility-gis-api.onrender.com/" target="_blank" rel="noopener noreferrer">Open Soil Fertility Map Generator <span aria-hidden="true">›</span></a>
+          </div>
+        </article>
+        <article class="card wide downloader" id="resources">
+          <div class="card-content">
+            <p class="category">GIS Data Download</p>
+            <h3>NPAAAD / SAFDZ<br>Map Downloader</h3>
+            <p class="description">Access and download NPAAAD and SAFDZ map datasets.</p>
+            <a class="button" href="https://npaaad-safdz-map-downloader.onrender.com/" target="_blank" rel="noopener noreferrer">Open Map Downloader <span aria-hidden="true">›</span></a>
+          </div>
+        </article>
+      </div>
+    </section>
+  </main>
+
+  <footer id="about">
+    <span aria-hidden="true">ⓘ</span>
+    <p>ALMED GIS Tools Portal · Department of Agriculture – Bureau of Soils and Water Management</p>
+  </footer>
+</body>
+</html>
