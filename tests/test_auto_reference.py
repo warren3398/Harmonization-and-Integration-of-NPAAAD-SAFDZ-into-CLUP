@@ -151,7 +151,7 @@ def test_inspect_reuse_and_real_job(setup, authenticated_client):
             assert {'HARMONIZED_UNION.qml','HARMONIZED_UNION.sld','LAND_USE_PALETTE.csv','STYLE_README.txt'} <= set(styled.namelist())
 
 
-def test_browser_auto_upload_and_responsive_layout(setup):
+def test_browser_auto_upload_and_responsive_layout(setup, open_harmonizer):
     from werkzeug.serving import make_server
     from playwright.sync_api import sync_playwright
     server=make_server('127.0.0.1',0,module.app,threaded=True)
@@ -162,7 +162,7 @@ def test_browser_auto_upload_and_responsive_layout(setup):
             browser=playwright.chromium.launch(**({'executable_path':__import__('os').environ['PLAYWRIGHT_CHROMIUM_EXECUTABLE']} if __import__('os').environ.get('PLAYWRIGHT_CHROMIUM_EXECUTABLE') else {}))
             page=browser.new_page(viewport={'width':1440,'height':1000})
             errors=[];page.on('pageerror',lambda error:errors.append(str(error)))
-            page.goto(f'http://127.0.0.1:{server.server_port}/harmonizer')
+            open_harmonizer(page, server, module.app)
             assert page.locator('#referenceMode').input_value()=='auto'
             assert page.locator('#r2_province').count()==0
             assert page.locator('[name=npaaad_zip]').is_disabled()
@@ -196,7 +196,7 @@ def test_browser_auto_upload_and_responsive_layout(setup):
 
 
 
-def test_browser_overlap_priority_and_cleanup_confirmation(setup):
+def test_browser_overlap_priority_and_cleanup_confirmation(setup, open_harmonizer):
     from werkzeug.serving import make_server
     from playwright.sync_api import sync_playwright
     server=make_server('127.0.0.1',0,module.app,threaded=True)
@@ -210,7 +210,7 @@ def test_browser_overlap_priority_and_cleanup_confirmation(setup):
         with sync_playwright() as playwright:
             browser=playwright.chromium.launch(**({'executable_path':__import__('os').environ['PLAYWRIGHT_CHROMIUM_EXECUTABLE']} if __import__('os').environ.get('PLAYWRIGHT_CHROMIUM_EXECUTABLE') else {}))
             page=browser.new_page(viewport={'width':390,'height':1000})
-            page.goto(f'http://127.0.0.1:{server.server_port}/harmonizer')
+            open_harmonizer(page, server, module.app)
             page.locator('[name=elu_zip]').set_input_files({'name':'conflict.zip','mimeType':'application/zip','buffer':content.getvalue()})
             page.locator('#eluConflictSummary p').first.wait_for(timeout=15000)
             assert page.locator('#runBtn').is_disabled()
@@ -295,7 +295,7 @@ def test_reference_reads_are_bounded_and_append_all_batches(setup,monkeypatch):
  assert cached==folder and again['token']==meta['token']
 
 
-def test_land_cover_upload_requires_category_review_and_can_be_removed(setup):
+def test_land_cover_upload_requires_category_review_and_can_be_removed(setup, open_harmonizer):
     from werkzeug.serving import make_server
     from playwright.sync_api import sync_playwright
     server=make_server('127.0.0.1',0,module.app,threaded=True)
@@ -304,7 +304,7 @@ def test_land_cover_upload_requires_category_review_and_can_be_removed(setup):
         with sync_playwright() as p:
             browser=p.chromium.launch(**({'executable_path':__import__('os').environ['PLAYWRIGHT_CHROMIUM_EXECUTABLE']} if __import__('os').environ.get('PLAYWRIGHT_CHROMIUM_EXECUTABLE') else {}))
             page=browser.new_page(viewport={'width':390,'height':900})
-            page.goto(f'http://127.0.0.1:{server.server_port}/harmonizer')
+            open_harmonizer(page, server, module.app)
             upload={'name':'elu.zip','mimeType':'application/zip','buffer':setup['raw']}
             page.locator('[name=elu_zip]').set_input_files(upload)
             page.wait_for_function("!document.querySelector('#runBtn').disabled",timeout=20000)
@@ -330,7 +330,7 @@ def test_land_cover_cannot_bypass_review(setup, authenticated_client):
     assert 'reviewed all ELU categories' in response.json['error']
 
 
-def test_browser_reconnects_to_existing_job_after_reload(setup):
+def test_browser_reconnects_to_existing_job_after_reload(setup, open_harmonizer):
     from werkzeug.serving import make_server
     from playwright.sync_api import sync_playwright
     server=make_server('127.0.0.1',0,module.app,threaded=True)
@@ -338,7 +338,8 @@ def test_browser_reconnects_to_existing_job_after_reload(setup):
     try:
         with sync_playwright() as p:
             browser=p.chromium.launch(**({'executable_path':__import__('os').environ['PLAYWRIGHT_CHROMIUM_EXECUTABLE']} if __import__('os').environ.get('PLAYWRIGHT_CHROMIUM_EXECUTABLE') else {}))
-            page=browser.new_page();page.goto(f'http://127.0.0.1:{server.server_port}/harmonizer')
+            page=browser.new_page()
+            open_harmonizer(page, server, module.app)
             jobid='a'*32
             state={'status':'complete','percent':100,'download_name':'Restored_NPAAAD_SAFDZ_Harmonize_Agricultural_Zones.zip','result_summary':{'features':3,'area_ha':12.5,'gray_features':1,'fallback_decisions':2}}
             attempts=[]
