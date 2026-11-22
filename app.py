@@ -435,7 +435,7 @@ def login():
     # Return users to the requested module after authentication.
     # Allow only known local destinations to prevent open redirects.
     destination = request.values.get('next', '')
-    if destination not in ('/eo79', '/harmonizer'):
+    if destination not in ('/', '/eo79', '/harmonizer'):
         destination = url_for('index')
     if session.get('logged_in'):
         return redirect(destination)
@@ -455,6 +455,7 @@ def logout():
     return redirect(url_for('login'))
 
 @app.route('/')
+@login_required
 def portal_home():
     return render_template('portal_home.html')
 
