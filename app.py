@@ -465,6 +465,19 @@ def index():
     return render_template('index.html')
 
 
+@app.get('/land-cover-converter')
+@login_required
+def download_land_cover_converter():
+    root = Path(__file__).resolve().parent / 'scripts'
+    bundle = io.BytesIO()
+    with zipfile.ZipFile(bundle, 'w', compression=zipfile.ZIP_DEFLATED) as archive:
+        for filename in ('Run_Land_Cover_Converter.cmd', 'convert_namria_landcover.py', 'Land_Cover_Converter_Readme.txt'):
+            archive.write(root / filename, filename)
+    bundle.seek(0)
+    return send_file(bundle, as_attachment=True, download_name='NAMRIA_2025_Land_Cover_Converter.zip',
+                     mimetype='application/zip')
+
+
 @app.route('/api/eo79/safdz/<island>/<province>')
 def eo79_safdz(island,province):
     """Server-side GeoPackage access for EO79 parcel intersection, without manifests."""
