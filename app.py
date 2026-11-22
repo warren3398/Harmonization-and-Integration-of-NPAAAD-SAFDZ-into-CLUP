@@ -778,14 +778,15 @@ def r2_dataset_rows():
     for page in client.get_paginator('list_objects_v2').paginate(Bucket=os.environ.get('R2_BUCKET','npaaad-safdz-data'),Prefix='nationwide/'):
         for item in page.get('Contents',[]):
             parts=item['Key'].split('/')
-            if len(parts)==4 and parts[1] in ('luzon','visayas','mindanao') and parts[3] in ('npaaad.gpkg','safdz.gpkg') and item['Size']>0:
-                rows.append({'island':parts[1],'province':parts[2],'layer':parts[3][:-5],'bytes':item['Size']})
+            if len(parts)==4 and parts[1] in ('luzon','visayas','mindanao') and parts[3] in ('npaaad.gpkg','safdz.gpkg','landcover.gpkg') and item['Size']>0:
+                rows.append({'island':parts[1],'province':parts[2],'layer':parts[3][:-5],'bytes':item['Size'],'etag':item.get('ETag','')})
     return rows
 
 @app.route('/api/r2/datasets')
 def list_r2_datasets():
     try:
-        rows=r2_dataset_rows()
+        rows=[{key:value for key,value in row.items() if key!='etag'}
+              for row in r2_dataset_rows() if row['layer']!='landcover']
         return jsonify({'datasets':rows})
     except Exception as e:
         return jsonify({'error':'Unable to list R2 datasets: '+str(e)}),502
@@ -839,12 +840,18 @@ def inspect_layers():
             import auto_reference
             if elu is None: raise ValueError('Upload an Existing / Actual Land Use (ELU) shapefile ZIP.')
             token=request.form.get('auto_reference_token','')
+            include_landcover = 'landcover' not in result
             try:
                 if not token: raise ValueError('No previous reference detection.')
                 folder,auto_meta=auto_reference.load(token,elu)
+                if auto_meta.get('include_landcover') != include_landcover:
+                    raise ValueError('Land Cover upload changed.')
             except ValueError:
-                folder,auto_meta=auto_reference.prepare(elu,r2_dataset_rows(),r2_download,suggest_field,normalize_polygon_gdf)
+                folder,auto_meta=auto_reference.prepare(elu,r2_dataset_rows(),r2_download,suggest_field,
+                                                        normalize_polygon_gdf,include_landcover=include_landcover)
             paths={role:folder/(role+'.gpkg') for role in ('npaaad','safdz')}
+            if include_landcover and auto_meta.get('land_cover_available'):
+                paths['landcover'] = folder/'landcover.gpkg'
             result['_auto_reference']=auto_meta
         elif chosen:
             paths={role:r2_download(key,job/(role+'.gpkg')) for role,key in chosen.items()}
@@ -1005,9 +1012,12 @@ def run_background(job_id, job, uploads, fields, elu_mapping):
         for f in (internal['elu'], internal['npaaad'], internal['safdz']):
             if f not in union2.columns:
                 raise ValueError(f'Classification field was lost after fast overlay: {f}')
-        if 'landcover_zip' in uploads:
-            progress(70, 'Processing Land Cover Map 2025')
-            shp_lc=extract_zip_path(uploads['landcover_zip'],job/'landcover'); lc_raw=gpd.read_file(shp_lc,columns=[fields['landcover']])
+        if 'landcover_gpkg' in uploads or 'landcover_zip' in uploads:
+            progress(70, 'Processing Land Cover Map')
+            source = uploads.get('landcover_gpkg')
+            if source is None:
+                source = extract_zip_path(uploads['landcover_zip'],job/'landcover')
+            lc_raw = gpd.read_file(source,columns=[fields['landcover']])
             qa['LandCover_before']=fast_qa(lc_raw)
             if fields['landcover'] not in lc_raw.columns:
                 raise ValueError(f"Land Cover classification field '{fields['landcover']}' was not found. Please select a valid field before processing.")
@@ -1236,9 +1246,6 @@ def process_start():
             raise ValueError('Resolve ELU overlaps or missing classifications before generation. Review the geometry report.')
         if cleanup_report['requires_change_confirmation'] and request.form.get('elu_cleanup_confirmed')!='yes':
             raise ValueError('Confirm the gap filling and/or class-priority changes before generation.')
-        if not has_landcover:
-            from workspace_ux import default_mapping
-            elu_mapping=default_mapping(elu[cleanup_field])
         review_path=job/'ELU_GEOMETRY_REVIEW.gpkg'
         shutil.copyfile(analysis_path,review_path)
         uploads['_elu_cleaned_path']=review_path
@@ -1246,15 +1253,27 @@ def process_start():
         if automatic:
             import auto_reference
             folder,meta=auto_reference.load(request.form.get('auto_reference_token'),elu)
-            for role in ('npaaad','safdz'):
+            detected_landcover = not has_landcover and bool(meta.get('land_cover_available'))
+            if not has_landcover and meta.get('include_landcover') is False:
+                raise ValueError('Inspect the ELU again after removing the manual Land Cover upload.')
+            roles = ('npaaad', 'safdz', 'landcover') if detected_landcover else ('npaaad', 'safdz')
+            for role in roles:
                 path=up/(role+'.gpkg')
                 shutil.copyfile(folder/(role+'.gpkg'),path)
                 uploads[role+'_gpkg']=path
             uploads['_auto_reference']=meta
+            if detected_landcover:
+                has_landcover=True
+                if request.form.get('elu_reviewed')!='yes':
+                    raise ValueError('Confirm that you reviewed all ELU categories, including Other / Ignore.')
+                elu_mapping=validate_elu_mapping(json.loads(request.form.get('elu_mapping','{}') or '{}'))
         elif chosen:
             for role,key in chosen.items(): uploads[role+'_gpkg']=r2_download(key,up/(role+'.gpkg'))
+        if not has_landcover:
+            from workspace_ux import default_mapping
+            elu_mapping=default_mapping(elu[cleanup_field])
         fields={role:request.form.get(role+'_field',default).strip() for role,default in
-                [('elu','ELU'),('clup','CLUP'),('npaaad','NPAAAD'),('safdz','SAFDZ'),('landcover','CLASS')]}
+                [('elu','ELU'),('clup','CLUP'),('npaaad','NPAAAD'),('safdz','SAFDZ'),('landcover','LANDCOVER' if 'landcover_gpkg' in uploads else 'CLASS')]}
         from workspace_ux import download_name
         set_job(job_id,status='queued',percent=0,step='Preparing data',elapsed=0,download_name=download_name(request.form.get('output_municipality')),result_summary={'elu_features':len(elu),'land_cover_included':has_landcover,'reference_mode':'automatic' if automatic else 'manual'})
         del elu

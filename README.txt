@@ -52,3 +52,20 @@ v2.7: Desktop shortcut support. INSTALL_AND_RUN.bat automatically creates a Wind
 
 
 v2.7: Login protection. Default username ALRMS; default password ALRMS001. Password is stored as a one-way hash. For public/GitHub deployment, override credentials and session secret using environment variables.
+
+NAMRIA 2025 land cover reference catalog
+---------------------------------------
+Keep the original regional packages under landcover/raw/2025/ in the
+private R2 bucket. Use the approved NAMRIA polygon source and retain its class
+labels. Prepare one indexed GeoPackage per province with:
+
+  python scripts/stage_landcover.py <source> <province-boundary> <output.gpkg> --class-field <NAMRIA-class-field>
+
+Store each prepared file in the existing reference bucket at
+nationwide/<island>/<province>/landcover.gpkg. Match the island and province
+slugs already used for NPAAAD and SAFDZ. For provinces spanning more than one
+source package, assemble the relevant source polygons before staging.
+The Harmonizer reads the relevant provinces, clips them to ELU, and reports
+actual coverage. A Land Cover upload overrides the automatic layer. Automatic
+coverage does not imply that every province has been published.
+Source: NAMRIA 2025 Land Cover Maps, https://geoportal.gov.ph/

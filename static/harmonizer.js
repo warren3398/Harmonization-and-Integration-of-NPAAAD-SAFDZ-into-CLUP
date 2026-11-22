@@ -16,9 +16,10 @@
   $('autoReferenceHeading').textContent=heading;$('autoReferenceText').textContent=text;$('autoReferenceStatus').dataset.state=state;
  }
  function sourceReady(){return mode.value==='auto'||(hasFile('npaaad_zip')&&hasFile('safdz_zip'));}
- function fieldsReady(){return ['elu','npaaad','safdz',...['clup','landcover'].filter(role=>hasFile(role+'_zip'))].every(role=>!!file(role+'_field')?.value);}
+ function hasLandCover(){return hasFile('landcover_zip')||!!inspection?._auto_reference?.land_cover_available;}
+ function fieldsReady(){return ['elu','npaaad','safdz',...(hasFile('clup_zip')?['clup']:[]),...(hasLandCover()?['landcover']:[])].every(role=>!!file(role+'_field')?.value);}
  function pendingCount(){return Object.values(eluMap).filter(value=>!value).length;}
- function reviewReady(){return !hasFile('landcover_zip')||(Object.keys(eluMap).length>0&&!pendingCount()&&!!$('eluReviewed')?.checked);}
+ function reviewReady(){return !hasLandCover()||(Object.keys(eluMap).length>0&&!pendingCount()&&!!$('eluReviewed')?.checked);}
  function cleanupReady(){const report=inspection?._elu_cleanup;return !report?.requires_review&&(!report?.requires_change_confirmation||$('eluCleanupConfirmed').checked);}
  function ready(){return cleanupReady()&&inspected&&hasFile('elu_zip')&&sourceReady()&&(mode.value!=='auto'||!!token.value)&&inspection?._crs_summary?.master_ok&&fieldsReady()&&reviewReady();}
  function refresh(){
@@ -26,12 +27,12 @@
   $('retryInspect').disabled=busy;
   $('retryInspect').classList.toggle('hidden',inspected||!hasFile('elu_zip'));
   form.setAttribute('aria-busy',String(busy));
-  $('runHint').textContent=inspection?._elu_cleanup?.requires_review?'Review the ELU geometry conflicts before generation.':busy?'Processing your selected files. Inputs are locked until this job finishes.':run.disabled?hasFile('landcover_zip')?'Complete uploads and confirm the land-cover comparison categories.':'Upload your ELU and wait for reference detection. Check any geometry warnings.':'Ready to generate the Excel summary, GIS layer, and QA/QC report.';
+  $('runHint').textContent=inspection?._elu_cleanup?.requires_review?'Review the ELU geometry conflicts before generation.':busy?'Processing your selected files. Inputs are locked until this job finishes.':run.disabled?hasLandCover()?'Complete uploads and confirm the land-cover comparison categories.':'Upload your ELU and wait for reference detection. Check any geometry warnings.':'Ready to generate the Excel summary, GIS layer, and QA/QC report.';
  }
  function updateMapping(){
   $('eluMapping').value=JSON.stringify(eluMap);
   const total=Object.keys(eluMap).length,pending=pendingCount(),ignored=Object.values(eluMap).filter(v=>v==='OTHER').length;
-  if(!hasFile('landcover_zip')){$('eluReviewed').checked=true;refresh();return;}
+  if(!hasLandCover()){$('eluReviewed').checked=true;refresh();return;}
   $('mappingCount').textContent=`${total-pending} of ${total} reviewed · ${pending} pending · ${ignored} ignored`;
   $('eluReviewed').disabled=!!pending||busy;
   $('eluReviewed').checked=false;
@@ -44,11 +45,11 @@
   eluMap=Object.create(null);rows.replaceChildren();
   for(const value of values){
    const normalized=String(value).toUpperCase().replace(/[_-]/g,' ').trim();
-   eluMap[value]=hasFile('landcover_zip')?'':(['AGR','AGRICULTURE','AGRICULTURAL'].includes(normalized)||normalized.startsWith('AGR ')?'AGR':(['BU','BUILT UP','BUILTUP'].includes(normalized)||normalized.includes('BUILT UP')?'BU':'OTHER'));const row=document.createElement('div');row.className='elu-map-row';
+   eluMap[value]=hasLandCover()?'':(['AGR','AGRICULTURE','AGRICULTURAL'].includes(normalized)||normalized.startsWith('AGR ')?'AGR':(['BU','BUILT UP','BUILTUP'].includes(normalized)||normalized.includes('BUILT UP')?'BU':'OTHER'));const row=document.createElement('div');row.className='elu-map-row';
    row.innerHTML=`<span>${esc(value)}</span><select aria-label="Category for ${esc(value)}"><option value="">Choose category…</option><option value="AGR">AGR — Agricultural</option><option value="BU">BU — Built-up</option><option value="OTHER">Other / Ignore</option></select>`;
    row.querySelector('select').addEventListener('change',event=>{eluMap[value]=event.target.value;updateMapping();});rows.append(row);
   }
-  $('eluMapBox').classList.toggle('hidden',!hasFile('landcover_zip'));
+  $('eluMapBox').classList.toggle('hidden',!hasLandCover());
   $('eluReviewed').checked=false;updateMapping();
   if(!values.length)notice('The selected ELU field has no descriptions. Choose a populated classification field.','error');
  }
@@ -93,7 +94,10 @@
     const names=[...new Set((detected.sources||[]).map(row=>row.province.replaceAll('-',' ')))];
     const coverage=detected.coverage_percent||{};
     const suffix=Object.entries(coverage).map(([role,value])=>role.toUpperCase()+': '+value+'% of ELU covered').join(' · ');
-    showReference('NPAAAD + SAFDZ cropped to your ELU',names.map(name=>name.toUpperCase()).join(', ')+(suffix?' · '+suffix:''),'ready');
+    const title=detected.land_cover_available ? 'NPAAAD, SAFDZ and Land Cover cropped to your ELU' : 'NPAAAD + SAFDZ cropped to your ELU';
+    const landCoverNote=hasFile('landcover_zip') ? ' · Using your Land Cover upload.' :
+      detected.land_cover_available ? ' · Source: ' + detected.land_cover_source + '.' : ' · No automatic Land Cover found for this ELU.';
+    showReference(title,names.map(name=>name.toUpperCase()).join(', ')+(suffix?' · '+suffix:'')+landCoverNote,'ready');
    }
    $('crsBanner').className='crs-banner '+(crs.master_ok?'ok':'warn');
    $('crsBanner').textContent=crs.master_ok?`Final CRS: ${crs.master_crs}. Other layers will be reprojected to match NPAAAD / SAFDZ.`:(crs.error||'NPAAAD and SAFDZ must have matching, readable coordinate systems.');
@@ -106,14 +110,14 @@
     cards.append(card);
     card.querySelector('select').addEventListener('change',e=>{if(role==='elu'){$('eluCleanupField').value=e.target.value;$('eluClassPriorities').value='{}';token.value='';inspectNow();}else refresh();});
    }
-   mapping.classList.remove('hidden');$('layerSettings').open=hasFile('landcover_zip')||!!data._elu_cleanup?.requires_review;setStep(0);
+   mapping.classList.remove('hidden');$('layerSettings').open=hasLandCover()||!!data._elu_cleanup?.requires_review;setStep(0);
    if(data.elu){$('eluCleanupField').value=file('elu_field').value;renderElu(file('elu_field').value);$('eluReviewed').addEventListener('change',()=>{
     if($('eluReviewed').checked){const allIgnored=Object.values(eluMap).every(v=>v==='OTHER');notice(allIgnored?'Mapping confirmed. All descriptions skip ELU comparison rules. Empty decisions will use the original ELU_CLS descriptions.':'Mapping confirmed. Ready to run harmonization.',allIgnored?'warning':'ready');}
     else notice('Confirm the ELU mapping to continue.','warning');refresh();
    });}
    if(data._elu_cleanup?.requires_review){showReference('Waiting for ELU geometry review','Resolve class conflicts or missing classifications before reference detection.','error');$('eluQualityPanel').open=true;}
    if(!crs.master_ok)notice(crs.error||'Upload NPAAAD and SAFDZ with matching coordinate systems.','error');
-   if(!hasFile('landcover_zip')&&crs.master_ok&&!data._elu_cleanup?.requires_review)notice('Files checked. Coordinate systems will align automatically. Ready to process.','ready');
+   if(!hasLandCover()&&crs.master_ok&&!data._elu_cleanup?.requires_review)notice('Files checked. Coordinate systems will align automatically. Ready to process.','ready');
    refresh();
   }catch(error){if(current!==sequence||error.name==='AbortError')return;if(mode.value==='auto'&&error.message.includes('Another ELU reference detection')){notice('Waiting for the active GIS operation to finish…');showReference('Preparing reference data…','Another GIS operation is running. This upload will retry automatically.','loading');waitForServer(current);return;}$('inspectMsg').setAttribute('aria-busy','false');inspected=false;mapping.classList.add('hidden');notice(error.message,'error');if(mode.value==='auto')showReference('Reference detection needs attention',error.message,'error');refresh();}
  }

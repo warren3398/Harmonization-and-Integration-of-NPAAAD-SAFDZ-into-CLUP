@@ -24,6 +24,7 @@ from shapely.ops import unary_union
 ROOT = Path(tempfile.gettempdir()) / 'harmonizer-auto-references'
 TTL = 3 * 3600
 LOCK = threading.Lock()
+REQUIRED = ('npaaad', 'safdz')
 INDEX_URL = 'https://geodata.ucdavis.edu/gadm/gadm4.1/json/gadm41_PHL_1.json.zip'
 
 
@@ -93,14 +94,14 @@ def load(token, elu):
             raise ValueError('The references expired. Upload the ELU again to refresh them.')
         if meta['boundary_hash'] != fingerprint(elu):
             raise ValueError('The ELU boundary changed. Detect and crop the reference files again.')
-        if not all((path / (role+'.gpkg')).is_file() for role in ('npaaad','safdz')):
+        if not all((path / (role+'.gpkg')).is_file() for role in (*REQUIRED, *(['landcover'] if meta.get('land_cover_available') else []))):
             raise FileNotFoundError()
         return path, meta
     except (FileNotFoundError, json.JSONDecodeError):
         raise ValueError('The references are unavailable after a restart. Upload the ELU again.')
 
 
-def prepare(elu, rows, download, suggest_field, normalize):
+def prepare(elu, rows, download, suggest_field, normalize, *, include_landcover=False):
     if not LOCK.acquire(blocking=False):
         raise ValueError('Another ELU reference detection is running. Please retry shortly.')
     folder = None
@@ -108,11 +109,18 @@ def prepare(elu, rows, download, suggest_field, normalize):
         clean_expired()
         mask = boundary(elu)
         boundary_hash=hashlib.sha256(shapely.normalize(mask).wkb).hexdigest()
+        rows = list(rows)
+        landcover_rows = sorted((row['island'], row['province'], row.get('etag', ''), row.get('bytes', 0))
+                                for row in rows if include_landcover and row['layer'] == 'landcover')
+        landcover_version = hashlib.sha256(json.dumps(landcover_rows).encode()).hexdigest()
         # Reuploads and an expired browser handle can reuse an identical crop.
         for cached in ROOT.iterdir():
             try:
                 meta=json.loads((cached/'metadata.json').read_text())
-                if meta['boundary_hash']==boundary_hash and time.time()-meta['created']<TTL and all((cached/(role+'.gpkg')).is_file() for role in ('npaaad','safdz')):
+                if (meta['boundary_hash'] == boundary_hash and time.time()-meta['created'] < TTL
+                        and meta.get('landcover_version') == landcover_version
+                        and all((cached/(role+'.gpkg')).is_file() for role in
+                                (*REQUIRED, *(['landcover'] if meta.get('land_cover_available') else [])))):
                     return cached,meta
             except (OSError,ValueError,KeyError):pass
         masks = regions()
@@ -121,8 +129,10 @@ def prepare(elu, rows, download, suggest_field, normalize):
             name = canonical(row['province'])
             if name not in masks:
                 continue  # Do not infer locations for ambiguous malformed aliases.
-            group = pairs.setdefault((row['island'], name), {})
             role = row['layer']
+            if role not in REQUIRED and not (role == 'landcover' and include_landcover):
+                continue
+            group = pairs.setdefault((row['island'], name), {})
             candidate = dict(row, key=f"nationwide/{row['island']}/{row['province']}/{role}.gpkg")
             if role not in group or ('-' in row['province'] and '-' not in group[role]['province']):
                 group[role] = candidate
@@ -132,13 +142,14 @@ def prepare(elu, rows, download, suggest_field, normalize):
         token = uuid.uuid4().hex
         folder = ROOT / token
         folder.mkdir()
-        counts = {'npaaad':0, 'safdz':0}
-        coverage_geometries = {'npaaad':None, 'safdz':None}
+        roles = (*REQUIRED, 'landcover') if include_landcover else REQUIRED
+        counts = dict.fromkeys(roles, 0)
+        coverage_geometries = dict.fromkeys(roles)
         sources = []
         target_crs = None
         for (island,province),layers in sorted(candidates):
             hit_roles = set()
-            for role in ('npaaad','safdz'):
+            for role in roles:
                 row = layers.get(role)
                 if not row:
                     continue
@@ -184,20 +195,27 @@ def prepare(elu, rows, download, suggest_field, normalize):
                         feature_count+=len(data)
                         del data
                     if feature_count:
-                        hit_roles.add(role)
+                        if role in REQUIRED:
+                            hit_roles.add(role)
                         sources.append({'island':island,'province':row['province'],'layer':role,'key':row['key'],'features':feature_count})
                 finally:
                     local.unlink(missing_ok=True)
-            if hit_roles and set(layers) != {'npaaad','safdz'}:
+            if hit_roles and not set(REQUIRED).issubset(layers):
                 raise ValueError(f'{province}: both NPAAAD and SAFDZ sources are required; one source is unavailable.')
         coverage = {}
         output_mask=gpd.GeoSeries([mask],crs=4326).to_crs(target_crs).iloc[0] if target_crs else None
         for role,count in counts.items():
+            if not count and role == 'landcover':
+                continue
             if not count:
                 raise ValueError(f'No {role.upper()} polygons intersect the ELU. Check source coverage and the ELU CRS.')
             coverage[role]=round(min(100.0,100.0*coverage_geometries[role].area/output_mask.area),2)
         meta = {'token':token,'created':time.time(),'expires_in':TTL,'boundary_hash':boundary_hash,
-                'sources':sources,'crs':str(target_crs),'cropped_to_elu':True,'coverage_percent':coverage}
+                'sources':sources,'crs':str(target_crs),'cropped_to_elu':True,'coverage_percent':coverage,
+                'landcover_version':landcover_version, 'include_landcover':include_landcover,
+                'land_cover_available':bool(counts.get('landcover'))}
+        if meta['land_cover_available']:
+            meta['land_cover_source'] = 'NAMRIA 2025 Land Cover Maps, Geoportal Philippines'
         (folder / 'metadata.json').write_text(json.dumps(meta))
         return folder, meta
     except Exception:

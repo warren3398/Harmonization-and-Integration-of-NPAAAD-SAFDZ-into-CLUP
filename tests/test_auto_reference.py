@@ -356,3 +356,48 @@ def test_browser_reconnects_to_existing_job_after_reload(setup, open_harmonizer)
             assert page.locator('[name=elu_zip]').is_enabled()
             browser.close()
     finally:server.shutdown()
+
+
+def test_namria_landcover_is_cropped_and_requires_review(setup, authenticated_client, monkeypatch):
+    sources = {}
+    for name, mask in auto_reference.regions().items():
+        source = setup['root'] / (name + '-landcover.gpkg')
+        gpd.GeoDataFrame({'LC_CLASS': ['Annual Crop']}, geometry=[mask], crs=4326).to_file(source)
+        sources[f'nationwide/luzon/{name}/landcover.gpkg'] = source
+        setup['rows'].append({'island': 'luzon', 'province': name, 'layer': 'landcover', 'bytes': source.stat().st_size})
+
+    def download(key, dest):
+        if key in sources:
+            setup['fetched'].append(key)
+            return shutil.copyfile(sources[key], dest)
+        return setup['download'](key, dest)
+
+    monkeypatch.setattr(module, 'r2_download', download)
+    client = authenticated_client(module.app)
+    data = client.post('/inspect', data={'reference_mode': 'auto', 'elu_zip': upload(setup['raw'])}).json
+    reference = data['_auto_reference']
+    assert reference['land_cover_available']
+    assert reference['coverage_percent']['landcover'] == 100
+    assert data['landcover']['suggested_field'] == 'LANDCOVER'
+    assert {row['province'] for row in reference['sources'] if row['layer'] == 'landcover'} == {'alpha', 'beta'}
+    folder, _ = auto_reference.load(reference['token'], setup['elu'])
+    crop = gpd.read_file(folder / 'landcover.gpkg').to_crs(setup['elu'].crs)
+    assert crop.geometry.union_all().symmetric_difference(setup['elu'].geometry.iloc[0]).area < .1
+    fields = {'reference_mode': 'auto', 'auto_reference_token': reference['token'],
+              'elu_field': 'LAND_USE', 'npaaad_field': 'NPAAAD', 'safdz_field': 'SAFDZ'}
+    response = client.post('/process_start', data={**fields, 'elu_zip': upload(setup['raw'])})
+    assert response.status_code == 400 and 'reviewed all ELU categories' in response.json['error']
+    fetch_count = len(setup['fetched'])
+    response = client.post('/process_start', data={
+        **fields, 'elu_zip': upload(setup['raw']), 'elu_reviewed': 'yes',
+        'elu_mapping': json.dumps({'Agriculture': 'AGR'}),
+    })
+    assert response.status_code == 200, response.json
+    for _ in range(150):
+        job = client.get('/progress/' + response.json['job_id']).json
+        if job['status'] in ('complete', 'error'):
+            break
+        time.sleep(.1)
+    assert job['status'] == 'complete', job
+    assert job['result_summary']['land_cover_included']
+    assert len(setup['fetched']) == fetch_count
