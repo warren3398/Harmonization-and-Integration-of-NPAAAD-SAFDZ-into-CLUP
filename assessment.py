@@ -127,19 +127,7 @@ def source_schema(path, role):
     return layer, info, field
 
 
-def source_batches(path, layer, columns, bbox, batch_size, check, stream):
-    if stream:
-        # Read the spatially filtered layer once. Reopening with larger offsets
-        # repeatedly walks earlier matches in GeoPackage layers.
-        with pyogrio.open_arrow(path, layer=layer, columns=columns, bbox=bbox,
-                                batch_size=batch_size, use_pyarrow=True) as (meta, reader):
-            geometry = meta['geometry_name'] or 'wkb_geometry'
-            for batch in reader:
-                check()
-                frame = batch.to_pandas(ignore_metadata=True)
-                shapes = sh.force_2d(sh.from_wkb(frame.pop(geometry).to_numpy()))
-                yield gpd.GeoDataFrame(frame, geometry=shapes, crs=meta['crs'])
-        return
+def source_batches(path, layer, columns, bbox, batch_size, check):
     offset = 0
     while True:
         check()
@@ -164,7 +152,7 @@ def bounds_overlap(left, right):
 
 
 def source_rows(path, role, province, qa, check, wanted=None, *, schema=None,
-                bbox=None, bound=None, stream=False):
+                bbox=None, bound=None, prepared=False):
     layer, info, field = schema if schema is not None else source_schema(path, role)
     if bbox is None:
         bbox = tuple(province.to_crs(info['crs']).total_bounds)
@@ -178,7 +166,7 @@ def source_rows(path, role, province, qa, check, wanted=None, *, schema=None,
     clip_bounds = (xmin - margin, ymin - margin, xmax + margin, ymax + margin)
     extra = [f for f in info['fields'] if f != field and f.upper() in {'MUN_NAME', 'ORIG_FID', 'LU_CODE', 'LANDUSE_CODE'}]
     batch_size = 24 if role == 'landuse' else 2
-    for batch in source_batches(path, layer, [field, *extra], bbox, batch_size, check, stream):
+    for batch in source_batches(path, layer, [field, *extra], bbox, batch_size, check):
         if wanted is not None:
             batch = batch[[wanted(str(record[field] or '').strip(), land_use_code({name: record[name] for name in extra}))
                            for record in batch[[field, *extra]].to_dict('records')]]
@@ -195,7 +183,7 @@ def source_rows(path, role, province, qa, check, wanted=None, *, schema=None,
             geom = geom_polygon(geom)
             if geom.is_empty or not geom.intersects(bound):
                 continue
-            if not stream or not bound.covers(geom):
+            if not prepared or not bound.covers(geom):
                 geom = geom_polygon(geom.intersection(bound))
             if geom.area > 0:
                 raw = str(record.pop(field) or '').strip()
@@ -303,8 +291,8 @@ def assessments(sources, row, mode, selected, out, progress, check, output=None,
     boundary = province.geometry.union_all()
     if boundary.is_empty:
         raise DataError('The selected boundary has no valid polygon.')
-    streamed_land = archive_bounds is not None
-    if streamed_land:
+    regional_table = archive_bounds is not None
+    if regional_table:
         sh.prepare(boundary)
     zone_files = {}
     zone_indices = {}
@@ -402,7 +390,7 @@ def assessments(sources, row, mode, selected, out, progress, check, output=None,
             if archive_bounds is not None and extent is not None and not bounds_overlap(extent, bbox):
                 continue
             for raw, geom, attrs in source_rows(path, 'landuse', province, qa, check, schema=schema,
-                                               bbox=bbox, bound=boundary, stream=streamed_land):
+                                               bbox=bbox, bound=boundary, prepared=regional_table):
                 qa['land_polygons'] += 1
                 crop = crop_name(raw, aliases, land_use_code(attrs))
                 if not crop:
@@ -414,7 +402,7 @@ def assessments(sources, row, mode, selected, out, progress, check, output=None,
                 if selected and crop not in selected and not ('Rice' in selected and crop in RICE_TYPES):
                     continue
                 for tile, cell in cells(geom):
-                    portion = geom if streamed_land and cell.covers(geom) else geom_polygon(geom.intersection(cell))
+                    portion = geom if regional_table and cell.covers(geom) else geom_polygon(geom.intersection(cell))
                     if not portion.area:
                         continue
                     previous = occupied.get(tile)
