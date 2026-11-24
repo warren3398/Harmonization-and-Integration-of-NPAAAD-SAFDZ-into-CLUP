@@ -53,7 +53,18 @@ ZONE_LABELS = {
         'BU': 'Built-up areas, urban land, airport, roads and bridges',
         'Others': 'Quarry, mine pit, barren land, rock land, river wash, beach sand, sand dunes and landfill',
     },
-    'npaaad': {},
+    'npaaad': {
+        'A': 'All irrigated land/areas',
+        'B': 'All irrigable lands already covered by irrigation projects with firm funding commitments',
+        'C': 'All alluvial plain lands highly suitable for agriculture whether irrigated or not',
+        'D': 'Agro-industrial crop-lands or lands presently planted to industrial crops that support the viability of existing agricultural infrastructure and agro-based enterprises',
+        'E': 'Highlands or areas located at an elevation of five hundred (500) meters or above and have the potentials for growing semi-temperate and high value crops',
+        'F': 'All agricultural lands that are ecologically fragile, the conversion of which will result in serious environmental degradation, and mangrove areas and fish sanctuaries',
+        'G': 'All fishery areas as defined pursuant to Fisheries Code of 1998',
+        'H': 'Forest/Watershed areas (critical watersheds including mangroves)',
+        'BU': 'Built-up areas, urban land, airport, roads and bridges',
+        'Others': 'Quarry, mine pit, barren land, rock land, river wash, beach sand, sand dunes and landfill',
+    },
 }
 EXPORTS = {'csv', 'npaaad.csv', 'safdz.csv', 'xlsx', 'pdf', 'geojson', 'gpkg', 'shp.zip', 'map.png', 'map.jpg', 'map.pdf', 'qa.json'}
 
@@ -475,9 +486,9 @@ def write_products(out, result, frame, province, output=None):
                 for row in table_rows:
                     sheet.append(row)
                 sheet.freeze_panes = 'B3'
-                sheet.row_dimensions[1].height = 96 if role == 'safdz' else 21
+                sheet.row_dimensions[1].height = 96 if role == 'safdz' else 122
                 for number, column in enumerate(sheet.columns, start=1):
-                    sheet.column_dimensions[get_column_letter(number)].width = 24 if number == 1 else 22 if role == 'safdz' else 15
+                    sheet.column_dimensions[get_column_letter(number)].width = 24 if number == 1 else 22 if role == 'safdz' else 32
                     for cell in column:
                         cell.border = Border(bottom=Side(style='thin', color='BCCAC5'),
                                              right=Side(style='thin', color='BCCAC5'))
