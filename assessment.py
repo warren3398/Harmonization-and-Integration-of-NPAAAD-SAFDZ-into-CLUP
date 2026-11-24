@@ -38,8 +38,23 @@ NON_CROP = {'buildup', 'builtup', 'forest', 'grassland', 'shrubland', 'shrubs', 
             'mangrove', 'river', 'riverwash', 'reservoir', 'lake', 'pasture', 'quarry', 'barrenland'}
 ZONE_COLUMNS = {'safdz': [str(i) for i in range(1, 11)] + ['BU', 'Others'],
                 'npaaad': list('ABCDEFGH') + ['BU', 'Others']}
-ZONE_LABELS = {'safdz': {'1': 'Strategic Crop Sub-Development Zone',
-                        '2': 'Strategic Livestock Sub-Development Zone'}, 'npaaad': {}}
+ZONE_LABELS = {
+    'safdz': {
+        '1': 'Strategic Crop Sub-Development Zone',
+        '2': 'Strategic Livestock Sub-Development Zone',
+        '3': 'Strategic Fishery Sub-Development Zone',
+        '4': 'Strategic Integrated Crop/Livestock Sub-Development Zone',
+        '5': 'Strategic Integrated Crop/Fishery Sub-Development Zone',
+        '6': 'Strategic Integrated Crop/Livestock/Fishery Sub-Development Zone',
+        '7': 'Strategic Integrated Fishery/Livestock Sub-Development Zone',
+        '8': 'Remaining NPAAAD',
+        '9': 'Agro-forestry',
+        '10': 'Watershed Areas/Forest areas (critical watershed including mangroves)',
+        'BU': 'Built-up areas, urban land, airport, roads and bridges',
+        'Others': 'Quarry, mine pit, barren land, rock land, river wash, beach sand, sand dunes and landfill',
+    },
+    'npaaad': {},
+}
 EXPORTS = {'csv', 'npaaad.csv', 'safdz.csv', 'xlsx', 'pdf', 'geojson', 'gpkg', 'shp.zip', 'map.png', 'map.jpg', 'map.pdf', 'qa.json'}
 
 
@@ -460,9 +475,9 @@ def write_products(out, result, frame, province, output=None):
                 for row in table_rows:
                     sheet.append(row)
                 sheet.freeze_panes = 'B3'
-                sheet.row_dimensions[1].height = 65
+                sheet.row_dimensions[1].height = 96 if role == 'safdz' else 21
                 for number, column in enumerate(sheet.columns, start=1):
-                    sheet.column_dimensions[get_column_letter(number)].width = 24 if number == 1 else 15
+                    sheet.column_dimensions[get_column_letter(number)].width = 24 if number == 1 else 22 if role == 'safdz' else 15
                     for cell in column:
                         cell.border = Border(bottom=Side(style='thin', color='BCCAC5'),
                                              right=Side(style='thin', color='BCCAC5'))
