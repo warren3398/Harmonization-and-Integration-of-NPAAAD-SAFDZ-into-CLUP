@@ -143,9 +143,14 @@ class Sources:
                     'dinagatislands': 'dinagatisland', 'maguindanaodelnorte': 'maguindanao',
                     'maguindanaodelsur': 'maguindanao',
                     'davaodeorocompostelavalley': 'davaodeoro' if 'davaodeoro' in zones else 'compostelavalley'}.get(slug, slug)
-            if slug in {'negrosoccidental', 'negrosoriental', 'siquijor'} and land.get('NIR'):
+            land_region = region_key(region)
+            if slug in {'negrosoccidental', 'negrosoriental', 'siquijor'}:
                 region = 'Negros Island Region (NIR)'
-            keys = [] if region_key(region) in missing_land else land.get(region_key(region), [])
+                # The 2020–2022 archives predate the current regional grouping.
+                # The Region VII archive contains the verified Siquijor features.
+                if slug != 'siquijor' and land.get('NIR'):
+                    land_region = 'NIR'
+            keys = [] if land_region in missing_land else land.get(land_region, [])
             matches = zones.get(slug, {})
             rows[str(row.ADM2_PCODE)] = {
                 'id': str(row.ADM2_PCODE), 'name': str(row.ADM2_EN), 'region': region,
