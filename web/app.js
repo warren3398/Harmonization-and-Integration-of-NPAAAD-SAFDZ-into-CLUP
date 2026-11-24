@@ -81,6 +81,7 @@ async function previewBoundary() {
 }
 
 $('region').onchange = () => {
+  resetCropOptions();
   areaRequest++;
   const nationwide = $('region').value === 'Nationwide';
   for (const format of $('settings').querySelectorAll('input[name=output]')) {
@@ -111,6 +112,7 @@ async function loadChildren(id, path) {
 }
 
 $('province').onchange = () => {
+  resetCropOptions();
   resetArea('municipality', 'Entire province');
   resetArea('barangay', 'Entire municipality or city');
   const {province} = selection();
@@ -119,6 +121,7 @@ $('province').onchange = () => {
   loadChildren('municipality', province && '/api/areas/' + encodeURIComponent(province) + '/municipalities');
 };
 $('municipality').onchange = () => {
+  resetCropOptions();
   resetArea('barangay', 'Entire municipality or city');
   const {province, municipality} = selection();
   updateAvailability();
@@ -126,8 +129,95 @@ $('municipality').onchange = () => {
   loadChildren('barangay', municipality && '/api/areas/' + encodeURIComponent(province)
     + '/municipalities/' + encodeURIComponent(municipality) + '/barangays');
 };
-$('barangay').onchange = previewBoundary;
+$('barangay').onchange = () => {
+  resetCropOptions();
+  previewBoundary();
+};
 $('mode').onchange = updateAvailability;
+let cropRequest = 0;
+let loadedCropArea = null;
+let loadingCropArea = null;
+
+function resetCropOptions() {
+  cropRequest++;
+  loadedCropArea = null;
+  loadingCropArea = null;
+  $('crop-picker').open = false;
+  $('crop-label').textContent = 'All mapped crops';
+  $('crops').replaceChildren();
+}
+
+function renderCropOptions(crops) {
+  $('crops').replaceChildren();
+  if (!crops.length) {
+    node('p', 'No mapped crops were found in the land-use data for this area.', $('crops'));
+    return;
+  }
+    const all = node('label', undefined, $('crops'));
+    const allCheckbox = node('input', undefined, all);
+    allCheckbox.type = 'checkbox'; allCheckbox.checked = true;
+    all.append(' All mapped crops');
+    const boxes = crops.map(({name, labels}) => {
+      const line = node('label', undefined, $('crops'));
+      const input = node('input', undefined, line);
+      input.type = 'checkbox'; input.value = name;
+      const sourceLabels = labels.filter(label => label.toLowerCase() !== name.toLowerCase());
+      line.append(' ' + name + (sourceLabels.length ? ' (' + sourceLabels.join(', ') + ')' : ''));
+      input.onchange = () => {
+        const count = boxes.filter(b => b.checked).length;
+        allCheckbox.checked = count === 0;
+        $('crop-label').textContent = count ? count + ' selected' : 'All mapped crops';
+      };
+      return input;
+    });
+    allCheckbox.onchange = () => {
+      allCheckbox.checked = true;
+      boxes.forEach(b => b.checked = false);
+      $('crop-label').textContent = 'All mapped crops';
+    };
+}
+
+async function loadCropOptions() {
+  const area = selection();
+  const key = JSON.stringify(area);
+  if (!area.region) {
+    $('crops').replaceChildren();
+    node('p', 'Select an assessment area to see its mapped crops.', $('crops'));
+    return;
+  }
+  if (loadedCropArea === key || loadingCropArea === key) return;
+  const serial = ++cropRequest;
+  loadingCropArea = key;
+  $('crops').replaceChildren();
+  const message = node('p', 'Reading crop labels from the land-use data…', $('crops'));
+  message.setAttribute('role', 'status');
+  try {
+    const job = await fetchData('/api/crop-options', {
+      method: 'POST', headers: {'Content-Type': 'application/json'}, body: key
+    });
+    while (serial === cropRequest) {
+      const state = await fetchData('/api/jobs/' + job.id, undefined, 3);
+      if (serial !== cropRequest) return;
+      if (state.status === 'complete') {
+        loadedCropArea = key;
+        renderCropOptions(state.result.crops);
+        return;
+      }
+      if (['failed', 'cancelled'].includes(state.status)) throw new Error(state.stage);
+      message.textContent = state.stage;
+      await wait(2500);
+    }
+  } catch (error) {
+    if (serial === cropRequest) message.textContent = error.message + ' Close and reopen this list to retry.';
+  } finally {
+    if (serial === cropRequest) loadingCropArea = null;
+  }
+}
+
+$('crop-picker').addEventListener('toggle', () => {
+  if ($('crop-picker').open) loadCropOptions();
+});
+
 async function init() {
   if (window.L) {
     map = L.map('map').setView([12.55, 122.5], 5);
@@ -150,27 +240,6 @@ async function init() {
     option($('region'), '', 'Choose a region');
     option($('region'), 'Nationwide', 'Nationwide (table)');
     [...new Set(provinces.map(p => p.region))].forEach(name => option($('region'), name, name));
-    const all = node('label', undefined, $('crops'));
-    const allCheckbox = node('input', undefined, all);
-    allCheckbox.type = 'checkbox'; allCheckbox.checked = true;
-    all.append(' All mapped crops');
-    const boxes = catalog.crops.map(crop => {
-      const line = node('label', undefined, $('crops'));
-      const input = node('input', undefined, line);
-      input.type = 'checkbox'; input.value = crop;
-      line.append(' ' + crop);
-      input.onchange = () => {
-        const count = boxes.filter(b => b.checked).length;
-        allCheckbox.checked = count === 0;
-        $('crop-label').textContent = count ? count + ' selected' : 'All mapped crops';
-      };
-      return input;
-    });
-    allCheckbox.onchange = () => {
-      allCheckbox.checked = true;
-      boxes.forEach(b => b.checked = false);
-      $('crop-label').textContent = 'All mapped crops';
-    };
   } catch (error) {
     $('availability').textContent = 'The GIS catalog could not be loaded. Refresh the page to retry.';
     $('region').options[0].textContent = 'GIS catalog unavailable';

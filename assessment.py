@@ -64,7 +64,7 @@ def geom_polygon(geom):
     return Polygon()
 
 
-def source_rows(path, role, province, qa, check):
+def source_schema(path, role):
     layer, info, field = None, None, None
     override = os.getenv('PCLAM_' + role.upper() + '_FIELD')
     fields = {'landuse': ['LANDUSE', 'LAND_USE', 'LU_DESC', 'DESCRIPTION', 'CLASS'],
@@ -81,6 +81,11 @@ def source_rows(path, role, province, qa, check):
             break
     if layer is None or not info['crs']:
         raise DataError(f'The {role.upper()} source lacks an identifiable classification field or CRS.')
+    return layer, info, field
+
+
+def source_rows(path, role, province, qa, check, wanted=None):
+    layer, info, field = source_schema(path, role)
     bbox = tuple(province.to_crs(info['crs']).total_bounds)
     bound = province.geometry.union_all()
     extra = [f for f in info['fields'] if f.upper() in {'MUN_NAME', 'ORIG_FID', 'LU_CODE', 'LANDUSE_CODE'}]
@@ -94,7 +99,10 @@ def source_rows(path, role, province, qa, check):
                                         skip_features=offset, max_features=batch_size, force_2d=True)
         if batch.empty:
             break
-        offset += len(batch)
+        count = len(batch)
+        offset += count
+        if wanted is not None:
+            batch = batch[batch[field].map(lambda value: wanted(str(value or '').strip()))]
         batch = batch.to_crs(CRS_AREA)
         for record in batch.to_dict('records'):
             geom = record.pop('geometry')
@@ -107,7 +115,7 @@ def source_rows(path, role, province, qa, check):
             if geom.area > 0:
                 raw = str(record.pop(field) or '').strip()
                 yield raw, geom, record
-        if len(batch) < batch_size:
+        if count < batch_size:
             break
 
 
@@ -631,3 +639,54 @@ def add_satellite_background(image, xmin, ymin, scale):
         return True
     except (URLError, OSError, ValueError):
         return False
+
+
+def landuse_crop_options(sources, rows, out, progress, check, nationwide=False):
+    aliases = {canonical(key): value for key, value in json.loads(os.getenv('PCLAM_CROP_MAPPING', '{}')).items()}
+    archives = {}
+    for index, row in enumerate(rows):
+        check()
+        for meta in row['land']:
+            entry = archives.setdefault(meta['Key'], (meta, []))
+            if not nationwide:
+                entry[1].append(index)
+    if not archives:
+        raise DataError('Land-use data is unavailable for this area.')
+    boundaries = {}
+    options = defaultdict(set)
+    qa = {'repaired_geometries': 0}
+    seen = set()
+
+    def wanted(raw):
+        return raw not in seen and crop_name(raw, aliases) in CROPS
+
+    for index, (meta, indices) in enumerate(archives.values()):
+        check()
+        progress(int(95 * index / len(archives)), f'Reading land-use archive {index + 1} of {len(archives)}')
+        for path in sources.land_files(meta, out):
+            if nationwide:
+                layer, _, field = source_schema(path, 'landuse')
+                values = pyogrio.read_dataframe(path, layer=layer, columns=[field], read_geometry=False)[field]
+                labels = (str(value).strip() for value in values.dropna().unique())
+                for raw in labels:
+                    crop = crop_name(raw, aliases)
+                    if crop in CROPS:
+                        options[crop].add(raw)
+            else:
+                pending = frozenset(indices)
+                if pending not in boundaries:
+                    shapes = []
+                    for row_index in sorted(pending):
+                        row = rows[row_index]
+                        frame = sources.boundary(row) if row.get('municipality') else sources.province(row['id'])
+                        shapes.extend(frame.to_crs(CRS_AREA).geometry.map(geom_polygon))
+                    boundaries[pending] = gpd.GeoDataFrame(geometry=[sh.union_all(shapes)], crs=CRS_AREA)
+                boundary = boundaries[pending]
+                if boundary.geometry.iloc[0].is_empty:
+                    continue
+                for raw, _, _ in source_rows(path, 'landuse', boundary, qa, check, wanted=wanted):
+                    crop = crop_name(raw, aliases)
+                    if crop in CROPS:
+                        options[crop].add(raw)
+                        seen.add(raw)
+    return {'crops': [{'name': crop, 'labels': sorted(labels)} for crop, labels in sorted(options.items())]}

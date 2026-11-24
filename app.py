@@ -15,7 +15,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 import os
 
-from assessment import CROPS, EXPORTS, assessments, regional_assessment
+from assessment import CROPS, EXPORTS, assessments, regional_assessment, landuse_crop_options
 from sources import DataError, Sources
 
 app = FastAPI(title='Provincial Crop-Based Land Use Assessment Map')
@@ -30,11 +30,14 @@ executor = ThreadPoolExecutor(max_workers=1)
 logger = logging.getLogger('pclam')
 
 
-class Request(BaseModel):
+class AreaRequest(BaseModel):
     region: str | None = Field(default=None, max_length=100)
     province: str | None = Field(default=None, max_length=32)
     municipality: str | None = Field(default=None, max_length=32)
     barangay: str | None = Field(default=None, max_length=32)
+
+
+class Request(AreaRequest):
     output: Literal['jpeg', 'shp', 'table'] | None = None
     focused: bool = False
     mode: Literal['npaaad', 'safdz', 'combined']
@@ -184,21 +187,79 @@ def start(request: Request):
         if not any(item['land'] and required.issubset(item['zones']) for item in rows):
             raise HTTPException(422, 'Required GIS layers are missing for this region.')
         row = {'id': request.region, 'name': request.region, 'level': 'Nationwide' if nationwide else 'Region', 'rows': rows}
+    return submit_job(run, request, row)
+
+
+@app.post('/api/crop-options', status_code=202)
+def crop_options(request: AreaRequest):
+    catalog()
+    nationwide = request.region == 'Nationwide'
+    if request.province:
+        row = selected_area(request.province, request.municipality, request.barangay)
+        if request.region and request.region != row['region']:
+            raise HTTPException(422, 'The selected province does not belong to this region.')
+        rows = [row]
+    else:
+        if not request.region or request.municipality or request.barangay:
+            raise HTTPException(422, 'Select an assessment area first.')
+        rows = [item for item in sources.catalog.values() if nationwide or item['region'] == request.region]
+    rows = [row for row in rows if row['land']]
+    if not rows:
+        raise HTTPException(404, 'Land-use data is unavailable for this area.')
+    key = tuple(getattr(request, field) for field in ('region', 'province', 'municipality', 'barangay'))
+    return submit_job(run_crop_options, rows, nationwide, key=key)
+
+
+def run_crop_options(job, rows, nationwide):
+    def check():
+        if job['cancel'].is_set():
+            raise Cancelled()
+
+    def progress(value, stage):
+        check()
+        job['state'].update(progress=value, stage=stage)
+
+    try:
+        job['state'].update(status='running')
+        result = landuse_crop_options(sources, rows, job['folder'], progress, check, nationwide=nationwide)
+        job['state'].update(status='complete', progress=100, stage='Land-use crops ready', result=result)
+    except Cancelled:
+        job['state'].update(status='cancelled', stage='Cancelled')
+    except Exception as exc:
+        logger.exception('Land-use crop list failed')
+        message = str(exc) if isinstance(exc, DataError) else 'Could not read the land-use crop list. Try again.'
+        job['state'].update(status='failed', stage=message)
+    finally:
+        shutil.rmtree(job['folder'], ignore_errors=True)
+        job['finished'] = time.monotonic()
+
+
+def submit_job(task, *args, key=None):
     with job_lock:
         now = time.monotonic()
         for key, old in list(jobs.items()):
             if old.get('finished') and now - old['finished'] > 3600:
                 shutil.rmtree(old['folder'], ignore_errors=True)
                 del jobs[key]
+        if key is not None:
+            for job_id, existing in jobs.items():
+                if existing.get('key') == key and existing['state']['status'] in ('queued', 'running', 'complete'):
+                    return {'id': job_id}
         if sum(not item.get('finished') for item in jobs.values()) >= 3:
             raise HTTPException(429, 'The assessment queue is full. Try again after a job completes.')
+        if len(jobs) >= 12:
+            for cached_id, cached_job in list(jobs.items()):
+                if cached_job.get('key') is not None and cached_job.get('finished'):
+                    del jobs[cached_id]
+                    break
         if len(jobs) >= 12:
             raise HTTPException(429, 'Temporary results storage is full. Try again later.')
         job_id = uuid.uuid4().hex
         job = {'folder': Path(tempfile.mkdtemp(prefix='pclam-result-')), 'cancel': Event(),
                'created': now, 'state': {'status': 'queued', 'progress': 0, 'stage': 'Queued'}}
+        job['key'] = key
         jobs[job_id] = job
-        executor.submit(run, job, request, row)
+        executor.submit(task, job, *args)
     return {'id': job_id}
 
 
