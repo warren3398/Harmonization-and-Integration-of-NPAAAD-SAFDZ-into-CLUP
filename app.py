@@ -36,6 +36,7 @@ class Request(BaseModel):
     municipality: str | None = Field(default=None, max_length=32)
     barangay: str | None = Field(default=None, max_length=32)
     output: Literal['jpeg', 'shp', 'table'] | None = None
+    focused: bool = False
     mode: Literal['npaaad', 'safdz', 'combined']
     crops: list[str] = Field(default_factory=list, max_length=len(CROPS))
 
@@ -143,10 +144,10 @@ def run(job, request, row):
         progress(1, 'Starting assessment')
         job['state']['status'] = 'running'
         args = (request.mode, set(request.crops), job['folder'], progress, check, request.output)
-        if row.get('level') == 'Region':
-            result = regional_assessment(sources, row['rows'], row['name'], *args)
+        if row.get('level') in ('Region', 'Nationwide'):
+            result = regional_assessment(sources, row['rows'], row['name'], *args, focused=request.focused)
         else:
-            result = assessments(sources, row, *args)
+            result = assessments(sources, row, *args, focused=request.focused)
         check()
         check_status = {'progress': 100, 'stage': 'Assessment ready', 'status': 'complete', 'result': result}
         job['state'].update(check_status)
@@ -176,10 +177,13 @@ def start(request: Request):
     else:
         if not request.region or request.municipality or request.barangay:
             raise HTTPException(422, 'Select a region and its parent areas as needed.')
-        rows = [item for item in sources.catalog.values() if item['region'] == request.region]
+        nationwide = request.region == 'Nationwide'
+        if nationwide and (request.output != 'table' or not request.focused):
+            raise HTTPException(422, 'Nationwide assessment is available as a table.')
+        rows = [item for item in sources.catalog.values() if nationwide or item['region'] == request.region]
         if not any(item['land'] and required.issubset(item['zones']) for item in rows):
             raise HTTPException(422, 'Required GIS layers are missing for this region.')
-        row = {'id': request.region, 'name': request.region, 'level': 'Region', 'rows': rows}
+        row = {'id': request.region, 'name': request.region, 'level': 'Nationwide' if nationwide else 'Region', 'rows': rows}
     with job_lock:
         now = time.monotonic()
         for key, old in list(jobs.items()):

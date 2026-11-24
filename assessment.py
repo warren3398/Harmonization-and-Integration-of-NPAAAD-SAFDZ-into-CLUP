@@ -105,7 +105,7 @@ def source_rows(path, role, province, qa, check):
             break
 
 
-def zone_masks(path, role, province, qa, check):
+def zone_masks(path, role, province, qa, check, measure=True):
     raw_groups = defaultdict(list)
     for raw, geom, _ in source_rows(path, role, province, qa, check):
         raw_groups[raw.upper()].append(geom)
@@ -124,7 +124,7 @@ def zone_masks(path, role, province, qa, check):
     if conflicts.area:
         codes = {label: geom_polygon(geom.difference(conflicts)) for label, geom in codes.items()}
     allowed = NP if role == 'npaaad' else SA
-    agricultural = sh.union_all([geom for code, geom in codes.items() if code in allowed])
+    agricultural = sh.union_all([geom for code, geom in codes.items() if code in allowed]) if measure else None
     return codes, agricultural
 
 
@@ -157,7 +157,7 @@ def class_name(np, sa, mode):
     return 'Outside both'
 
 
-def assessments(sources, row, mode, selected, out, progress, check, output=None, intermediate=False):
+def assessments(sources, row, mode, selected, out, progress, check, output=None, intermediate=False, focused=False):
     required = ('npaaad', 'safdz') if mode == 'combined' else (mode,)
     missing = [role.upper() for role in required if role not in row['zones']]
     if missing or not row['land']:
@@ -201,8 +201,9 @@ def assessments(sources, row, mode, selected, out, progress, check, output=None,
         tile_qa = {'repaired_geometries': 0, 'source_overlap_ha': {}}
         areas = {}
         for role, path in zone_files.items():
-            masks[role], ag = zone_masks(path, role, tile_province, tile_qa, check)
-            areas[role] = ag.area
+            masks[role], ag = zone_masks(path, role, tile_province, tile_qa, check, measure=not focused)
+            if ag is not None:
+                areas[role] = ag.area
         if tile not in measured:
             measured[tile] = areas
             qa['repaired_geometries'] += tile_qa['repaired_geometries']
@@ -215,6 +216,8 @@ def assessments(sources, row, mode, selected, out, progress, check, output=None,
     pending = []
     occupied = {}
     export_path = out / 'assessment.gpkg'
+    feature_count = 0
+    store_geometry = not (focused and intermediate and output == 'table')
     total = len(row['land'])
     for index, meta in enumerate(sorted(row['land'], key=lambda m: m['Key'])):
         check()
@@ -243,11 +246,24 @@ def assessments(sources, row, mode, selected, out, progress, check, output=None,
                     occupied[tile] = sh.union(occupied.get(tile, Polygon()), remaining)
                     masks = tile_masks(tile, cell)
                     s = stats[crop]
-                    for np, piece in zone_partitions(remaining, masks.get('npaaad', {})):
-                        for sa, result in zone_partitions(piece, masks.get('safdz', {})):
+                    np_zones = masks.get('npaaad', {})
+                    sa_zones = masks.get('safdz', {})
+                    if focused:
+                        s['Total mapped'] += remaining.area / 10000
+                        np_zones = {code: geom for code, geom in np_zones.items() if code in NP}
+                        sa_zones = {code: geom for code, geom in sa_zones.items() if code in SA}
+                    for np, piece in zone_partitions(remaining, np_zones):
+                        for sa, result in zone_partitions(piece, sa_zones):
+                            if focused and not (np or sa):
+                                continue
                             area = result.area / 10000
                             category = class_name(np, sa, mode)
-                            s['Total mapped'] += area
+                            if focused:
+                                s['Within selected zone(s)'] += area
+                                if mode == 'combined':
+                                    category = 'Both' if np and sa else 'NPAAAD only' if np else 'SAFDZ only'
+                            else:
+                                s['Total mapped'] += area
                             s[category] += area
                             if np in NP: s['Agricultural NPAAAD'] += area
                             if sa in SA: s['Agricultural SAFDZ'] += area
@@ -256,6 +272,9 @@ def assessments(sources, row, mode, selected, out, progress, check, output=None,
                             if np in VALID['npaaad'] - NP: s['Outside agricultural NPAAAD'] += area
                             if sa in VALID['safdz'] - SA: s['Outside agricultural SAFDZ'] += area
                             if area < .0001: qa['slivers_under_1m2'] += 1
+                            feature_count += 1
+                            if not store_geometry:
+                                continue
                             pending.append({'region': row['region'], 'province': row['name'], 'psgc': row['id'],
                                             'municipality': row.get('municipality_name') or attrs.get('Mun_Name'),
                                             'barangay': row.get('barangay_name'), 'lu_original': raw,
@@ -267,43 +286,48 @@ def assessments(sources, row, mode, selected, out, progress, check, output=None,
                                 flush(pending, export_path)
     flush(pending, export_path)
     qa['source_crop_labels'] = sorted(observed_crops)
-    if not export_path.exists():
+    if store_geometry and not export_path.exists():
         frame = gpd.GeoDataFrame({'crop_name': [], 'assessment': [], 'area_ha': []}, geometry=[], crs=CRS_AREA)
         pyogrio.write_dataframe(frame, export_path, layer='assessment', geometry_type='MultiPolygon')
-    progress(87, 'Calculating area of the protection layers')
+    progress(87, 'Summarizing crop hectares' if focused else 'Calculating area of the protection layers')
     qa['assessment_area_ha'] = boundary.area / 10000
     qa['province_area_ha'] = qa['assessment_area_ha']
     occupied_area = sum(g.area for g in occupied.values()) / 10000
     occupied.clear()
     tile_masks.cache_clear()
-    for tile, cell in cells(boundary):
-        if tile not in measured:
-            check()
-            tile_masks(tile, cell)
-            tile_masks.cache_clear()
-    qa['agricultural_zone_area_ha'] = {role: sum(v.get(role, 0) for v in measured.values()) / 10000
-                                      for role in required}
+    if focused:
+        qa['agricultural_zone_area_ha'] = {}
+    else:
+        for tile, cell in cells(boundary):
+            if tile not in measured:
+                check()
+                tile_masks(tile, cell)
+                tile_masks.cache_clear()
+        qa['agricultural_zone_area_ha'] = {role: sum(v.get(role, 0) for v in measured.values()) / 10000
+                                          for role in required}
     qa['area_reconciliation_ha'] = abs(sum(s['Total mapped'] for s in stats.values()) -
                                       occupied_area)
-    frame = pyogrio.read_dataframe(export_path)
     for totals in stats.values():
+        if focused:
+            totals.setdefault('Within selected zone(s)', 0.)
         for role in required:
             key = f'Agricultural {role.upper()}'
             totals[f'{role.upper()} coverage (%)'] = 100 * totals.get(key, 0) / totals['Total mapped']
         if mode == 'combined':
             totals['Both coverage (%)'] = 100 * totals.get('Both', 0) / totals['Total mapped']
-            totals['Outside both (%)'] = 100 * totals.get('Outside both', 0) / totals['Total mapped']
+            if not focused:
+                totals['Outside both (%)'] = 100 * totals.get('Outside both', 0) / totals['Total mapped']
         safdz_ha = qa['agricultural_zone_area_ha'].get('safdz', 0)
         if safdz_ha:
             totals['Share of assessed SAFDZ (%)' if row.get('municipality') else 'Share of provincial SAFDZ (%)'] = 100 * totals.get('Agricultural SAFDZ', 0) / safdz_ha
     bounds = list(province.to_crs('EPSG:4326').total_bounds)
     result = {'province': row['name'], 'region': row['region'], 'mode': mode, 'bounds': bounds,
-              'stats': stats, 'qa': qa, 'features': len(frame), 'colors': COLORS,
+              'stats': stats, 'qa': qa, 'features': feature_count, 'colors': COLORS, 'focused': focused,
               'area': row.get('area', row['name']), 'level': row.get('level', 'Province')}
     if intermediate:
         return result
     progress(95, 'Preparing selected output')
-    write_products(out, result, frame, province, output)
+    write_products(out, result, pyogrio.read_dataframe(export_path), province, output)
     return result
 
 
@@ -328,6 +352,9 @@ def write_products(out, result, frame, province, output=None):
     (out / 'assessment.qa.json').write_text(json.dumps(qa, ensure_ascii=False, indent=2))
     fields = list(dict.fromkeys(['Total mapped', *(k for row in result['stats'].values() for k in row)]))
     matrix = [['Crop', *[key if key.endswith('(%)') else f'{key} (ha)' for key in fields]]]
+    if result.get('focused') and 'Within selected zone(s)' not in fields:
+        fields.append('Within selected zone(s)')
+        matrix[0].append('Within selected zone(s) (ha)')
     for crop, stats in sorted(result['stats'].items()):
         matrix.append([crop, *[round(stats.get(key, 0), 6) for key in fields]])
     if len(matrix) > 1:
@@ -500,8 +527,9 @@ def shutil_make_zip(output, folder):
             archive.write(file, file.name)
 
 
-def regional_assessment(sources, rows, region, mode, selected, out, progress, check, output):
+def regional_assessment(sources, rows, region, mode, selected, out, progress, check, output, focused=False):
     areas = []
+    feature_count = 0
     stats = defaultdict(lambda: defaultdict(float))
     zones = defaultdict(float)
     summaries = []
@@ -519,12 +547,13 @@ def regional_assessment(sources, rows, region, mode, selected, out, progress, ch
 
         with tempfile_directory(out) as temp:
             folder = Path(temp)
-            result = assessments(sources, row, mode, selected, folder, stage, check, output, intermediate=True)
-            if result['features']:
+            result = assessments(sources, row, mode, selected, folder, stage, check, output, intermediate=True, focused=focused)
+            feature_count += result['features']
+            if result['features'] and not (focused and output == 'table'):
                 frame = pyogrio.read_dataframe(folder / 'assessment.gpkg')
                 pyogrio.write_dataframe(frame, target, layer='assessment', append=target.exists(),
                                         geometry_type='MultiPolygon', promote_to_multi=True)
-        areas.append(sources.province(row['id']).to_crs(CRS_AREA).geometry.map(geom_polygon).union_all())
+        areas.append(sources.province(row['id']).to_crs(CRS_AREA).geometry.map(geom_polygon).union_all().simplify(80, preserve_topology=True))
         summaries.append({'province': row['name'], **result['qa']})
         for key, value in result['qa']['agricultural_zone_area_ha'].items():
             zones[key] += value
@@ -544,7 +573,7 @@ def regional_assessment(sources, rows, region, mode, selected, out, progress, ch
 
     coverage = gpd.GeoDataFrame(geometry=[sh.union_all(areas)], crs=CRS_AREA)
     outline = gpd.GeoDataFrame(geometry=[sh.union_all([
-        sources.province(row['id']).to_crs(CRS_AREA).geometry.map(geom_polygon).union_all()
+        sources.province(row['id']).to_crs(CRS_AREA).geometry.map(geom_polygon).union_all().simplify(80, preserve_topology=True)
         for row in rows
     ])], crs=CRS_AREA) if missing else coverage
     frame = pyogrio.read_dataframe(target) if target.exists() else gpd.GeoDataFrame(
@@ -555,18 +584,19 @@ def regional_assessment(sources, rows, region, mode, selected, out, progress, ch
     for summary in summaries:
         for label, area in summary['unmapped_land_classes_ha'].items():
             unmapped[label] += area
+    area_ha = sum(i['assessment_area_ha'] for i in summaries) if focused else coverage.area.iloc[0] / 10000
     qa = {'land_polygons': sum(i['land_polygons'] for i in summaries),
           'source_crop_labels': sorted({crop for i in summaries for crop in i['source_crop_labels']}),
           'unmapped_land_classes_ha': dict(unmapped),
-          'assessment_area_ha': coverage.area.iloc[0] / 10000, 'missing_provinces': missing,
+          'assessment_area_ha': area_ha, 'missing_provinces': missing,
           'province_results': summaries, 'agricultural_zone_area_ha': dict(zones),
-          'province_area_ha': coverage.area.iloc[0] / 10000,
+          'province_area_ha': area_ha,
           'repaired_geometries': sum(i['repaired_geometries'] for i in summaries),
           'slivers_under_1m2': sum(i['slivers_under_1m2'] for i in summaries),
           'area_reconciliation_ha': sum(i['area_reconciliation_ha'] for i in summaries)}
-    result = {'province': region, 'region': region, 'area': region, 'level': 'Region',
+    result = {'province': region, 'region': region, 'area': region, 'level': 'Nationwide' if region == 'Nationwide' else 'Region',
               'mode': mode, 'stats': stats, 'qa': qa, 'missing_provinces': missing,
-              'bounds': list(outline.to_crs('EPSG:4326').total_bounds), 'features': len(frame), 'colors': COLORS}
+              'bounds': list(outline.to_crs('EPSG:4326').total_bounds), 'features': feature_count, 'colors': COLORS, 'focused': focused}
     progress(95, 'Preparing selected output')
     write_products(out, result, frame, outline, output)
     return result

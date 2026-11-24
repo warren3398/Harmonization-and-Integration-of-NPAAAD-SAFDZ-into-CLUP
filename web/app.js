@@ -31,12 +31,12 @@ async function fetchData(path, options, retries = 0) {
   return response.json();
 }
 function updateAvailability() {
-  const candidates = provinces.filter(p => p.region === $('region').value &&
+  const candidates = provinces.filter(p => ($('region').value === 'Nationwide' || p.region === $('region').value) &&
     (!$('province').value || p.id === $('province').value));
   const eligible = candidates.filter(p => p.land_available && modes[$('mode').value].every(key => p.coverage.includes(key)));
   $('availability').textContent = candidates.length && !eligible.length
     ? 'Required source layers are unavailable for this selection.'
-    : eligible.length < candidates.length ? 'Partial coverage. Included provinces: ' + eligible.map(p => p.name).join(', ') : '';
+    : eligible.length < candidates.length ? 'Partial coverage. ' + eligible.length + ' of ' + candidates.length + ' areas have the required layers.' : '';
   $('run').disabled = eligible.length === 0 || Boolean(current);
 }
 
@@ -58,6 +58,13 @@ async function previewBoundary() {
   const area = selection();
   if (previewLayer) previewLayer.remove();
   if (!map || !area.region) return;
+  if (area.region === 'Nationwide') {
+    overlays.forEach(layer => layer.remove());
+    overlays = [];
+    $('map-title').textContent = 'Nationwide';
+    map.setView([12.55, 122.5], 5);
+    return;
+  }
   $('map-title').textContent = ['barangay','municipality','province','region'].map(key =>
     area[key] ? $(key).selectedOptions[0]?.textContent : null).filter(Boolean).join(' · ');
   try {
@@ -75,6 +82,11 @@ async function previewBoundary() {
 
 $('region').onchange = () => {
   areaRequest++;
+  const nationwide = $('region').value === 'Nationwide';
+  for (const format of $('settings').querySelectorAll('input[name=output]')) {
+    format.disabled = nationwide && format.value !== 'table';
+    if (nationwide && format.value === 'table') format.checked = true;
+  }
   resetArea('province', 'Entire region');
   resetArea('municipality', 'Entire province');
   resetArea('barangay', 'Entire municipality or city');
@@ -136,6 +148,7 @@ async function init() {
     provinces = catalog.provinces;
     $('region').replaceChildren();
     option($('region'), '', 'Choose a region');
+    option($('region'), 'Nationwide', 'Nationwide (table)');
     [...new Set(provinces.map(p => p.region))].forEach(name => option($('region'), name, name));
     const all = node('label', undefined, $('crops'));
     const allCheckbox = node('input', undefined, all);
@@ -170,7 +183,11 @@ function renderStats(result, id) {
   const qa = result.qa || {};
   const available = qa.source_crop_labels || [];
   const unknown = Object.keys(qa.unmapped_land_classes_ha || {});
-  let note = 'Hectares calculated within the selected boundary.';
+  let note = result.focused ? 'Crop hectares inside the selected agricultural zones. Combined mode counts shared areas once.'
+    : 'Hectares calculated within the selected boundary.';
+  if (result.focused && result.features === 0 && Object.keys(result.stats).length) {
+    note = 'Crops were found, but none intersected the selected agricultural zones.';
+  }
   if (!Object.keys(result.stats).length) {
     if (qa.land_polygons === 0) note = 'No land-use polygons intersect the selected boundary.';
     else if (available.length) note = 'No polygons matched the selected crops. Crops found in this area: ' + available.join(', ') + '.';
@@ -184,7 +201,7 @@ function renderStats(result, id) {
   const fields = [...new Set(['Total mapped', ...rows.flatMap(([, values]) => Object.keys(values))])];
   const totals = Object.fromEntries(fields.map(field => [field, rows.reduce((sum, [, r]) => sum + (r[field] || 0) * (field.endsWith('(%)') && !field.startsWith('Share of ') ? r['Total mapped'] / rows.reduce((total, [, crop]) => total + crop['Total mapped'], 0) : 1), 0)]));
   $('cards').replaceChildren();
-  for (const field of ['Total mapped', 'Agricultural NPAAAD', 'Agricultural SAFDZ', 'Missing coverage']) {
+  for (const field of ['Within selected zone(s)', 'Total mapped', 'Agricultural NPAAAD', 'Agricultural SAFDZ', 'Missing coverage']) {
     if (!rows.length || !(field in totals)) continue;
     const card = node('div', field, $('cards'));
     card.className = 'card';
@@ -245,12 +262,12 @@ $('settings').onsubmit = async event => {
   $('job').querySelector('progress').value = 0;
   try {
     const result = await fetchData('/api/jobs', {method:'POST', headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({...selection(), mode:$('mode').value,
+      body:JSON.stringify({...selection(), focused:true, mode:$('mode').value,
       output:$('settings').querySelector('input[name=output]:checked').value,
       crops:[...$('crops').querySelectorAll('input[value]:checked')].map(box => box.value)})});
     current = result.id; $('cancel').hidden = false;
     while (true) {
-      const state = await fetchData('/api/jobs/' + current);
+      const state = await fetchData('/api/jobs/' + current, undefined, 3);
       $('status').textContent = state.stage + ' · ' + state.elapsed + 's';
       $('job').querySelector('progress').value = state.progress;
       if (state.status === 'complete') {
