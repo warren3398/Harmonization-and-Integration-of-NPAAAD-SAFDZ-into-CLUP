@@ -12,21 +12,24 @@ import pyogrio
 import shapely as sh
 from shapely.geometry import Polygon, box
 
+from bswm_land_use import CROP_BY_CODE, LAND_USE
 from sources import ZONES, DataError, canonical
 
 CRS_AREA = 'EPSG:6933'
 NP = {'A', 'B', 'C', 'D', 'E', 'G'}
 SA = {str(i) for i in range(1, 8)}
 VALID = {'npaaad': NP | {'F', 'H', 'BU'}, 'safdz': SA | {'8', '9', '10', 'BU', 'WB'}}
-CROPS = ('Rice', 'Irrigated Rice', 'Rainfed Rice', 'Upland Rice', 'Corn', 'Sweet Corn', 'Coconut', 'Mango', 'Banana',
+LEGACY_CROPS = ('Rice', 'Irrigated Rice', 'Rainfed Rice', 'Upland Rice', 'Corn', 'Sweet Corn', 'Coconut', 'Mango', 'Banana',
          'Coffee', 'Cacao', 'Onion', 'Garlic', 'Pineapple', 'Sugarcane', 'Abaca', 'Cassava',
          'Sweet Potato', 'Potato', 'Durian', 'Avocado', 'Rubber', 'Peanut', 'Mungbean', 'Soybean',
          'Sorghum', 'Vegetables', 'Strawberry', 'Citrus', 'Tobacco', 'Papaya', 'Oil Palm',
          'Dragon Fruit', 'Rambutan', 'Cut Flowers', 'Diversified Crops', 'Mixed Fruit Trees', 'Other Agricultural Crops')
+CROPS = tuple(dict.fromkeys((*LEGACY_CROPS, *CROP_BY_CODE.values())))
 COLORS = {'Both': '#187354', 'NPAAAD only': '#4e65aa', 'SAFDZ only': '#a763b0',
           'Outside both': '#e6963e', 'Missing coverage': '#7d8799', 'Within NPAAAD': '#187354',
           'Outside NPAAAD': '#e6963e', 'Within SAFDZ': '#187354', 'Outside SAFDZ': '#e6963e'}
 CROP_MAP = {canonical(name): name for name in CROPS}
+CROP_MAP.update({canonical(LAND_USE[code]): crop for code, crop in CROP_BY_CODE.items()})
 CROP_MAP.update({'mixedvegetables': 'Vegetables', 'diversifiedcrop': 'Diversified Crops', 'abacca': 'Abaca', 'maize': 'Corn', 'sugarcaneplantation': 'Sugarcane', 'coconutplantation': 'Coconut',
                  'palay': 'Rice', 'ricelandirrigated': 'Irrigated Rice', 'ricelandrainfed': 'Rainfed Rice'})
 # BSWM Map Guidebook, Table 5 (Land Use). Keep the source abbreviation
@@ -36,6 +39,7 @@ BSWM_RICE_CODES = {'pri': 'Irrigated Rice', 'prn': 'Rainfed Rice',
 RICE_TYPES = {'Irrigated Rice', 'Rainfed Rice', 'Upland Rice'}
 NON_CROP = {'buildup', 'builtup', 'forest', 'grassland', 'shrubland', 'shrubs', 'water', 'fishpond',
             'mangrove', 'river', 'riverwash', 'reservoir', 'lake', 'pasture', 'quarry', 'barrenland'}
+NON_CROP.update(canonical(label) for code, label in LAND_USE.items() if code not in CROP_BY_CODE)
 ZONE_COLUMNS = {'safdz': [str(i) for i in range(1, 11)] + ['BU', 'Others'],
                 'npaaad': list('ABCDEFGH') + ['BU', 'Others']}
 ZONE_LABELS = {
@@ -69,7 +73,7 @@ ZONE_LABELS = {
 EXPORTS = {'csv', 'npaaad.csv', 'safdz.csv', 'xlsx', 'pdf', 'geojson', 'gpkg', 'shp.zip', 'map.png', 'map.jpg', 'map.pdf', 'qa.json'}
 
 
-def crop_name(raw, aliases):
+def crop_name(raw, aliases, code=None):
     key = canonical(raw)
     if key in aliases:
         return aliases[key]
@@ -78,8 +82,18 @@ def crop_name(raw, aliases):
     if key in CROP_MAP:
         return CROP_MAP[key]
     simplified = re.sub(r'\s*\([^()]*\)\s*$', '', raw.strip())
-    # Prefer explicit names; codes alone cannot establish a crop identity.
-    return CROP_MAP.get(canonical(simplified))
+    if canonical(simplified) in CROP_MAP:
+        return CROP_MAP[canonical(simplified)]
+    if canonical(simplified) in NON_CROP:
+        return None
+    # Numeric values from GIS fields can be represented as integral floats.
+    code = re.sub(r'(?<=\d)\.0+$', '', str(code if code is not None else raw).strip().lower())
+    return CROP_BY_CODE.get(code)
+
+
+def land_use_code(attrs):
+    return next((value for field, value in attrs.items()
+                 if field.upper() in {'LU_CODE', 'LANDUSE_CODE'} and str(value).strip()), None)
 
 
 def geom_polygon(geom):
@@ -97,7 +111,7 @@ def geom_polygon(geom):
 def source_schema(path, role):
     layer, info, field = None, None, None
     override = os.getenv('PCLAM_' + role.upper() + '_FIELD')
-    fields = {'landuse': ['LANDUSE', 'LAND_USE', 'LU_DESC', 'DESCRIPTION', 'CLASS'],
+    fields = {'landuse': ['LANDUSE', 'LAND_USE', 'LU_DESC', 'DESCRIPTION', 'CLASS', 'LU_CODE', 'LANDUSE_CODE'],
               'npaaad': ['NPAAAD', 'NPAAAD_CL', 'NPAAAD_CLASS', 'CLASS'],
               'safdz': ['SAFDZ', 'SAFDZ_CL', 'SAFDZ_CLASS', 'CLASS']}[role]
     for candidate, geometry_type in pyogrio.list_layers(path):
@@ -124,7 +138,7 @@ def source_rows(path, role, province, qa, check, wanted=None):
     xmin, ymin, xmax, ymax = bbox
     margin = max(xmax - xmin, ymax - ymin) * .25
     clip_bounds = (xmin - margin, ymin - margin, xmax + margin, ymax + margin)
-    extra = [f for f in info['fields'] if f.upper() in {'MUN_NAME', 'ORIG_FID', 'LU_CODE', 'LANDUSE_CODE'}]
+    extra = [f for f in info['fields'] if f != field and f.upper() in {'MUN_NAME', 'ORIG_FID', 'LU_CODE', 'LANDUSE_CODE'}]
     # Use the GeoPackage spatial index before fetching geometry. Seek by FID
     # across batches so a large part cannot make memory grow with feature count.
     batch_size = 24 if role == 'landuse' else 2
@@ -138,7 +152,8 @@ def source_rows(path, role, province, qa, check, wanted=None):
         count = len(batch)
         offset += count
         if wanted is not None:
-            batch = batch[batch[field].map(lambda value: wanted(str(value or '').strip()))]
+            batch = batch[[wanted(str(record[field] or '').strip(), land_use_code({name: record[name] for name in extra}))
+                           for record in batch[[field, *extra]].to_dict('records')]]
         if role != 'landuse':
             batch.geometry = batch.geometry.map(
                 lambda geom: sh.clip_by_rect(geom, *clip_bounds)
@@ -325,7 +340,7 @@ def assessments(sources, row, mode, selected, out, progress, check, output=None,
         for path in sources.land_files(meta, out):
             for raw, geom, attrs in source_rows(path, 'landuse', province, qa, check):
                 qa['land_polygons'] += 1
-                crop = crop_name(raw, aliases)
+                crop = crop_name(raw, aliases, land_use_code(attrs))
                 if not crop:
                     if canonical(raw) not in NON_CROP:
                         unmapped = qa['unmapped_land_classes_ha']
@@ -385,7 +400,7 @@ def assessments(sources, row, mode, selected, out, progress, check, output=None,
                             pending.append({'region': row['region'], 'province': row['name'], 'psgc': row['id'],
                                             'municipality': row.get('municipality_name') or attrs.get('Mun_Name'),
                                             'barangay': row.get('barangay_name'), 'lu_original': raw,
-                                            'lu_code': str(attrs.get('LU_CODE', attrs.get('LANDUSE_CODE', ''))),
+                                            'lu_code': str(land_use_code(attrs) or ''),
                                             'source_fid': str(attrs.get('ORIG_FID', '')), 'crop_name': crop,
                                             'npaaad_code': np, 'safdz_code': sa, 'assessment': category,
                                             'area_ha': area, 'data_year': '2020–2022', 'geometry': result})
@@ -760,8 +775,8 @@ def landuse_crop_options(sources, rows, out, progress, check):
     qa = {'repaired_geometries': 0}
     seen = set()
 
-    def wanted(raw):
-        return raw not in seen and crop_name(raw, aliases) in CROPS
+    def wanted(raw, code):
+        return (raw, code) not in seen and crop_name(raw, aliases, code) in CROPS
 
     for index, (meta, indices) in enumerate(archives.values()):
         check()
@@ -778,9 +793,11 @@ def landuse_crop_options(sources, rows, out, progress, check):
             boundary = boundaries[pending]
             if boundary.geometry.iloc[0].is_empty:
                 continue
-            for raw, _, _ in source_rows(path, 'landuse', boundary, qa, check, wanted=wanted):
-                crop = crop_name(raw, aliases)
+            for raw, _, attrs in source_rows(path, 'landuse', boundary, qa, check, wanted=wanted):
+                crop = crop_name(raw, aliases, land_use_code(attrs))
                 if crop in CROPS:
-                    options[crop].add(raw)
-                    seen.add(raw)
+                    labels = options[crop]
+                    if raw and raw.lower() != 'nan':
+                        labels.add(raw)
+                    seen.add((raw, land_use_code(attrs)))
     return {'crops': [{'name': crop, 'labels': sorted(labels)} for crop, labels in sorted(options.items())]}
