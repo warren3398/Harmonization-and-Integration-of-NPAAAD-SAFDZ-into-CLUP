@@ -12,8 +12,18 @@ function node(tag, text, parent) {
   return element;
 }
 function option(select, value, title) { const o = node('option', title, select); o.value = value; }
-async function fetchData(path, options) {
-  const response = await fetch(api + path, options);
+const wait = ms => new Promise(resolve => setTimeout(resolve, ms));
+async function fetchData(path, options, retries = 0) {
+  let response;
+  for (let attempt = 0; ; attempt++) {
+    try {
+      response = await fetch(api + path, options);
+      if (![502, 503, 504].includes(response.status) || attempt === retries) break;
+    } catch (error) {
+      if (attempt === retries) throw error;
+    }
+    await wait(1500 * 2 ** attempt);
+  }
   if (!response.ok) {
     const detail = (await response.json().catch(() => ({}))).detail;
     throw new Error(typeof detail === 'string' ? detail : 'The GIS service is temporarily unavailable.');
@@ -52,7 +62,7 @@ async function previewBoundary() {
     area[key] ? $(key).selectedOptions[0]?.textContent : null).filter(Boolean).join(' · ');
   try {
     const query = new URLSearchParams(Object.entries(area).filter(([, id]) => id));
-    const shape = await fetchData('/api/boundary?' + query);
+    const shape = await fetchData('/api/boundary?' + query, undefined, 3);
     if (serial !== previewRequest || current) return;
     overlays.forEach(layer => layer.remove());
     overlays = [];
@@ -79,7 +89,7 @@ async function loadChildren(id, path) {
   const serial = ++areaRequest;
   if (!path) return;
   try {
-    const rows = await fetchData(path);
+    const rows = await fetchData(path, undefined, 3);
     if (serial !== areaRequest) return;
     for (const row of rows) option($(id), row.id, row.name);
     $(id).disabled = rows.length === 0;
@@ -115,7 +125,14 @@ async function init() {
     L.control.scale({imperial: false}).addTo(map);
   }
   try {
-    const catalog = await fetchData('/api/catalog');
+    const catalog = await Promise.any([
+      fetchData('/api/catalog', {signal: AbortSignal.timeout(12000)}),
+      wait(700).then(async () => {
+        const response = await fetch('./catalog.json');
+        if (!response.ok) throw new Error('The saved GIS catalog is unavailable.');
+        return response.json();
+      })
+    ]);
     provinces = catalog.provinces;
     $('region').replaceChildren();
     option($('region'), '', 'Choose a region');
@@ -142,7 +159,7 @@ async function init() {
       $('crop-label').textContent = 'All mapped crops';
     };
   } catch (error) {
-    $('availability').textContent = error.message;
+    $('availability').textContent = 'The GIS catalog could not be loaded. Refresh the page to retry.';
     $('region').options[0].textContent = 'GIS catalog unavailable';
   }
 }
