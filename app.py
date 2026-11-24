@@ -297,7 +297,10 @@ def file(job_id: str, format: str):
     if job['state']['status'] != 'complete':
         raise HTTPException(404, 'Assessment files are unavailable.')
     if format in {'boundary.geojson', 'map.geojson'}:
-        return FileResponse(job['folder'] / format, media_type='application/geo+json')
+        path = job['folder'] / format
+        if not path.is_file():
+            raise HTTPException(404, 'This map is unavailable for the assessment.')
+        return FileResponse(path, media_type='application/geo+json')
     path = job['folder'] / ('assessment.' + format)
     if format not in EXPORTS or not path.is_file():
         raise HTTPException(404, 'This file is unavailable for the assessment.')

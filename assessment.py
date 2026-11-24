@@ -611,6 +611,9 @@ def write_products(out, result, frame, province, output=None):
             diagnostics.append([label, round(area, 6)])
             diagnostics.cell(diagnostics.max_row, 1).data_type = 's'
         workbook.save(out / 'assessment.xlsx')
+        if output == 'table' and result['level'] == 'Nationwide':
+            result['exports'] = ['xlsx', *csv_exports, 'qa.json']
+            return
     if output == 'shp' or (output is None and len(frame)):
         with tempfile_directory(out) as directory:
             path = Path(directory)
@@ -737,6 +740,7 @@ def shutil_make_zip(output, folder):
 
 
 def regional_assessment(sources, rows, region, mode, selected, out, progress, check, output, focused=False):
+    nationwide_table = region == 'Nationwide' and focused and output == 'table'
     areas = []
     feature_count = 0
     stats = defaultdict(lambda: defaultdict(float))
@@ -770,7 +774,8 @@ def regional_assessment(sources, rows, region, mode, selected, out, progress, ch
             for crop, values in crop_areas.items():
                 for code, area in values.items():
                     matrix_areas[role][crop][code] += area
-        areas.append(sources.province(row['id']).to_crs(CRS_AREA).geometry.map(geom_polygon).union_all().simplify(80, preserve_topology=True))
+        if not nationwide_table:
+            areas.append(sources.province(row['id']).to_crs(CRS_AREA).geometry.map(geom_polygon).union_all().simplify(80, preserve_topology=True))
         summaries.append({'province': row['name'], **result['qa']})
         for key, value in result['qa']['agricultural_zone_area_ha'].items():
             zones[key] += value
@@ -788,15 +793,19 @@ def regional_assessment(sources, rows, region, mode, selected, out, progress, ch
         if zones['safdz']:
             values['Share of assessed SAFDZ (%)'] = 100 * values.get('Agricultural SAFDZ', 0) / zones['safdz']
 
-    coverage = gpd.GeoDataFrame(geometry=[sh.union_all(areas)], crs=CRS_AREA)
-    outline = gpd.GeoDataFrame(geometry=[sh.union_all([
-        sources.province(row['id']).to_crs(CRS_AREA).geometry.map(geom_polygon).union_all().simplify(80, preserve_topology=True)
-        for row in rows
-    ])], crs=CRS_AREA) if missing else coverage
-    frame = pyogrio.read_dataframe(target) if target.exists() else gpd.GeoDataFrame(
-        {'crop_name': [], 'assessment': [], 'area_ha': []}, geometry=[], crs=CRS_AREA)
-    if not target.exists():
-        pyogrio.write_dataframe(frame, target, layer='assessment', geometry_type='MultiPolygon')
+    frame = outline = None
+    bounds = []
+    if not nationwide_table:
+        coverage = gpd.GeoDataFrame(geometry=[sh.union_all(areas)], crs=CRS_AREA)
+        outline = gpd.GeoDataFrame(geometry=[sh.union_all([
+            sources.province(row['id']).to_crs(CRS_AREA).geometry.map(geom_polygon).union_all().simplify(80, preserve_topology=True)
+            for row in rows
+        ])], crs=CRS_AREA) if missing else coverage
+        frame = pyogrio.read_dataframe(target) if target.exists() else gpd.GeoDataFrame(
+            {'crop_name': [], 'assessment': [], 'area_ha': []}, geometry=[], crs=CRS_AREA)
+        if not target.exists():
+            pyogrio.write_dataframe(frame, target, layer='assessment', geometry_type='MultiPolygon')
+        bounds = list(outline.to_crs('EPSG:4326').total_bounds)
     unmapped = defaultdict(float)
     for summary in summaries:
         for label, area in summary['unmapped_land_classes_ha'].items():
@@ -813,7 +822,7 @@ def regional_assessment(sources, rows, region, mode, selected, out, progress, ch
           'area_reconciliation_ha': sum(i['area_reconciliation_ha'] for i in summaries)}
     result = {'province': region, 'region': region, 'area': region, 'level': 'Nationwide' if region == 'Nationwide' else 'Region',
               'mode': mode, 'stats': stats, 'qa': qa, 'missing_provinces': missing,
-              'bounds': list(outline.to_crs('EPSG:4326').total_bounds), 'features': feature_count, 'colors': COLORS, 'focused': focused}
+              'bounds': bounds, 'features': feature_count, 'colors': COLORS, 'focused': focused}
     progress(95, 'Preparing selected output')
     if matrix_areas:
         result['zone_tables'] = zone_tables(matrix_areas, stats)
