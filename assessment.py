@@ -80,11 +80,12 @@ def source_rows(path, role, province, qa, check):
     extra = [f for f in info['fields'] if f.upper() in {'MUN_NAME', 'ORIG_FID', 'LU_CODE', 'LANDUSE_CODE'}]
     # Use the GeoPackage spatial index before fetching geometry. Seek by FID
     # across batches so a large part cannot make memory grow with feature count.
+    batch_size = 64 if role == 'landuse' else 16
     offset = 0
     while True:
         check()
         batch = pyogrio.read_dataframe(path, layer=layer, columns=[field, *extra], bbox=bbox,
-                                        skip_features=offset, max_features=300, force_2d=True)
+                                        skip_features=offset, max_features=batch_size, force_2d=True)
         if batch.empty:
             break
         offset += len(batch)
@@ -100,7 +101,7 @@ def source_rows(path, role, province, qa, check):
             if geom.area > 0:
                 raw = str(record.pop(field) or '').strip()
                 yield raw, geom, record
-        if len(batch) < 300:
+        if len(batch) < batch_size:
             break
 
 
@@ -180,7 +181,7 @@ def assessments(sources, row, mode, selected, out, progress, check, output=None,
         qa['zone_objects'][role] = {key: meta[key] for key in ('Key', 'ETag')}
         zone_files[role] = sources.file(ZONES, meta['Key'], meta)
 
-    cell_size = 7000
+    cell_size = 3500
     measured = {}
     def cells(shape):
         xmin, ymin, xmax, ymax = shape.bounds
@@ -190,7 +191,7 @@ def assessments(sources, row, mode, selected, out, progress, check, output=None,
                 if shape.intersects(cell):
                     yield (x, y), cell
 
-    @lru_cache(maxsize=8)
+    @lru_cache(maxsize=3)
     def tile_masks(tile, cell):
         local = geom_polygon(boundary.intersection(cell))
         if local.is_empty:
@@ -272,14 +273,18 @@ def assessments(sources, row, mode, selected, out, progress, check, output=None,
     progress(87, 'Calculating area of the protection layers')
     qa['assessment_area_ha'] = boundary.area / 10000
     qa['province_area_ha'] = qa['assessment_area_ha']
+    occupied_area = sum(g.area for g in occupied.values()) / 10000
+    occupied.clear()
+    tile_masks.cache_clear()
     for tile, cell in cells(boundary):
         if tile not in measured:
             check()
             tile_masks(tile, cell)
+            tile_masks.cache_clear()
     qa['agricultural_zone_area_ha'] = {role: sum(v.get(role, 0) for v in measured.values()) / 10000
                                       for role in required}
     qa['area_reconciliation_ha'] = abs(sum(s['Total mapped'] for s in stats.values()) -
-                                      sum(g.area for g in occupied.values()) / 10000)
+                                      occupied_area)
     frame = pyogrio.read_dataframe(export_path)
     for totals in stats.values():
         for role in required:
