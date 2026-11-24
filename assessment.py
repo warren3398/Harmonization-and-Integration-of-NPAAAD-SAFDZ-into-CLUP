@@ -118,10 +118,16 @@ def source_rows(path, role, province, qa, check, wanted=None):
     layer, info, field = source_schema(path, role)
     bbox = tuple(province.to_crs(info['crs']).total_bounds)
     bound = province.geometry.union_all()
+    # A source polygon can span the whole province even for a municipal query.
+    # Keep a margin around the requested extent before expensive reprojection
+    # and topology repair. The final overlay still uses the exact boundary.
+    xmin, ymin, xmax, ymax = bbox
+    margin = max(xmax - xmin, ymax - ymin) * .25
+    clip_bounds = (xmin - margin, ymin - margin, xmax + margin, ymax + margin)
     extra = [f for f in info['fields'] if f.upper() in {'MUN_NAME', 'ORIG_FID', 'LU_CODE', 'LANDUSE_CODE'}]
     # Use the GeoPackage spatial index before fetching geometry. Seek by FID
     # across batches so a large part cannot make memory grow with feature count.
-    batch_size = 64 if role == 'landuse' else 16
+    batch_size = 24 if role == 'landuse' else 2
     offset = 0
     while True:
         check()
@@ -133,6 +139,11 @@ def source_rows(path, role, province, qa, check, wanted=None):
         offset += count
         if wanted is not None:
             batch = batch[batch[field].map(lambda value: wanted(str(value or '').strip()))]
+        if role != 'landuse':
+            batch.geometry = batch.geometry.map(
+                lambda geom: sh.clip_by_rect(geom, *clip_bounds)
+                if sh.get_num_coordinates(geom) > 100_000 else geom
+            )
         batch = batch.to_crs(CRS_AREA)
         for record in batch.to_dict('records'):
             geom = record.pop('geometry')
