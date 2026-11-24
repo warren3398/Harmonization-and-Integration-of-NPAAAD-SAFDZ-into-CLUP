@@ -3,12 +3,14 @@ import json
 import os
 import re
 from collections import defaultdict
+from functools import lru_cache
+from math import floor
 from pathlib import Path
 
 import geopandas as gpd
 import pyogrio
 import shapely as sh
-from shapely.geometry import Polygon
+from shapely.geometry import Polygon, box
 
 from sources import ZONES, DataError, canonical
 
@@ -168,18 +170,46 @@ def assessments(sources, row, mode, selected, out, progress, check):
     boundary = province.geometry.union_all()
     if boundary.is_empty:
         raise DataError('The selected boundary has no valid polygon.')
-    masks, agricultural = {}, {}
-    for index, role in enumerate(('npaaad', 'safdz')):
-        meta = row['zones'].get(role) if mode in (role, 'combined') else None
-        masks[role], agricultural[role] = {}, Polygon()
-        if meta:
-            progress(10 + 12 * index, f'Reading {role.upper()} and resolving source overlaps')
-            check()
-            qa['zone_objects'][role] = {key: meta[key] for key in ('Key', 'ETag')}
-            masks[role], agricultural[role] = zone_masks(sources.file(ZONES, meta['Key'], meta), role, province, qa, check)
+    zone_files = {}
+    for index, role in enumerate(required):
+        meta = row['zones'][role]
+        progress(10 + 12 * index, f'Retrieving {role.upper()} source')
+        check()
+        qa['zone_objects'][role] = {key: meta[key] for key in ('Key', 'ETag')}
+        zone_files[role] = sources.file(ZONES, meta['Key'], meta)
+
+    cell_size = 7000
+    measured = {}
+    def cells(shape):
+        xmin, ymin, xmax, ymax = shape.bounds
+        for x in range(floor(xmin / cell_size), floor(xmax / cell_size) + 1):
+            for y in range(floor(ymin / cell_size), floor(ymax / cell_size) + 1):
+                cell = box(x * cell_size, y * cell_size, (x + 1) * cell_size, (y + 1) * cell_size)
+                if shape.intersects(cell):
+                    yield (x, y), cell
+
+    @lru_cache(maxsize=8)
+    def tile_masks(tile, cell):
+        local = geom_polygon(boundary.intersection(cell))
+        if local.is_empty:
+            return {}
+        tile_province = gpd.GeoDataFrame(geometry=[local], crs=CRS_AREA)
+        masks = {}
+        tile_qa = {'repaired_geometries': 0, 'source_overlap_ha': {}}
+        areas = {}
+        for role, path in zone_files.items():
+            masks[role], ag = zone_masks(path, role, tile_province, tile_qa, check)
+            areas[role] = ag.area
+        if tile not in measured:
+            measured[tile] = areas
+            qa['repaired_geometries'] += tile_qa['repaired_geometries']
+            for role, area in tile_qa['source_overlap_ha'].items():
+                qa['source_overlap_ha'][role] = qa['source_overlap_ha'].get(role, 0) + area
+        return masks
+
     stats = defaultdict(lambda: defaultdict(float))
     pending = []
-    occupied = Polygon()
+    occupied = {}
     export_path = out / 'assessment.gpkg'
     total = len(row['land'])
     for index, meta in enumerate(sorted(row['land'], key=lambda m: m['Key'])):
@@ -196,41 +226,52 @@ def assessments(sources, row, mode, selected, out, progress, check):
                     continue
                 if selected and crop not in selected:
                     continue
-                remaining = geom_polygon(geom.difference(occupied))
-                qa['land_overlap_ha'] += max(0., geom.area - remaining.area) / 10000
-                if remaining.is_empty:
-                    continue
-                occupied = sh.union(occupied, remaining)
-                s = stats[crop]
-                for np, piece in zone_partitions(remaining, masks['npaaad']):
-                    for sa, result in zone_partitions(piece, masks['safdz']):
-                        area = result.area / 10000
-                        category = class_name(np, sa, mode)
-                        s['Total mapped'] += area
-                        s[category] += area
-                        if np in NP: s['Agricultural NPAAAD'] += area
-                        if sa in SA: s['Agricultural SAFDZ'] += area
-                        if np == 'F': s['Fragile agricultural land'] += area
-                        if np == 'H': s['Forest / watershed'] += area
-                        if np in VALID['npaaad'] - NP: s['Outside agricultural NPAAAD'] += area
-                        if sa in VALID['safdz'] - SA: s['Outside agricultural SAFDZ'] += area
-                        if area < .0001: qa['slivers_under_1m2'] += 1
-                        pending.append({'region': row['region'], 'province': row['name'], 'psgc': row['id'],
-                                        'municipality': attrs.get('Mun_Name'), 'lu_original': raw,
-                                        'lu_code': str(attrs.get('LU_CODE', attrs.get('LANDUSE_CODE', ''))),
-                                        'source_fid': str(attrs.get('ORIG_FID', '')), 'crop_name': crop,
-                                        'npaaad_code': np, 'safdz_code': sa, 'assessment': category,
-                                        'area_ha': area, 'data_year': '2020–2022', 'geometry': result})
-                        if len(pending) >= 250:
-                            flush(pending, export_path)
+                for tile, cell in cells(geom):
+                    portion = geom_polygon(geom.intersection(cell))
+                    if not portion.area:
+                        continue
+                    remaining = geom_polygon(portion.difference(occupied.get(tile, Polygon())))
+                    qa['land_overlap_ha'] += max(0., portion.area - remaining.area) / 10000
+                    if remaining.is_empty:
+                        continue
+                    occupied[tile] = sh.union(occupied.get(tile, Polygon()), remaining)
+                    masks = tile_masks(tile, cell)
+                    s = stats[crop]
+                    for np, piece in zone_partitions(remaining, masks.get('npaaad', {})):
+                        for sa, result in zone_partitions(piece, masks.get('safdz', {})):
+                            area = result.area / 10000
+                            category = class_name(np, sa, mode)
+                            s['Total mapped'] += area
+                            s[category] += area
+                            if np in NP: s['Agricultural NPAAAD'] += area
+                            if sa in SA: s['Agricultural SAFDZ'] += area
+                            if np == 'F': s['Fragile agricultural land'] += area
+                            if np == 'H': s['Forest / watershed'] += area
+                            if np in VALID['npaaad'] - NP: s['Outside agricultural NPAAAD'] += area
+                            if sa in VALID['safdz'] - SA: s['Outside agricultural SAFDZ'] += area
+                            if area < .0001: qa['slivers_under_1m2'] += 1
+                            pending.append({'region': row['region'], 'province': row['name'], 'psgc': row['id'],
+                                            'municipality': attrs.get('Mun_Name'), 'lu_original': raw,
+                                            'lu_code': str(attrs.get('LU_CODE', attrs.get('LANDUSE_CODE', ''))),
+                                            'source_fid': str(attrs.get('ORIG_FID', '')), 'crop_name': crop,
+                                            'npaaad_code': np, 'safdz_code': sa, 'assessment': category,
+                                            'area_ha': area, 'data_year': '2020–2022', 'geometry': result})
+                            if len(pending) >= 250:
+                                flush(pending, export_path)
     flush(pending, export_path)
     if not export_path.exists():
         frame = gpd.GeoDataFrame({'crop_name': [], 'assessment': [], 'area_ha': []}, geometry=[], crs=CRS_AREA)
         pyogrio.write_dataframe(frame, export_path, layer='assessment', geometry_type='MultiPolygon')
     progress(90, 'Writing maps and statistical reports')
     qa['province_area_ha'] = boundary.area / 10000
-    qa['agricultural_zone_area_ha'] = {k: v.area / 10000 for k, v in agricultural.items() if mode in (k, 'combined')}
-    qa['area_reconciliation_ha'] = abs(sum(s['Total mapped'] for s in stats.values()) - occupied.area / 10000)
+    for tile, cell in cells(boundary):
+        if tile not in measured:
+            check()
+            tile_masks(tile, cell)
+    qa['agricultural_zone_area_ha'] = {role: sum(v.get(role, 0) for v in measured.values()) / 10000
+                                      for role in required}
+    qa['area_reconciliation_ha'] = abs(sum(s['Total mapped'] for s in stats.values()) -
+                                      sum(g.area for g in occupied.values()) / 10000)
     frame = pyogrio.read_dataframe(export_path)
     for totals in stats.values():
         for role in required:
@@ -239,8 +280,9 @@ def assessments(sources, row, mode, selected, out, progress, check):
         if mode == 'combined':
             totals['Both coverage (%)'] = 100 * totals.get('Both', 0) / totals['Total mapped']
             totals['Outside both (%)'] = 100 * totals.get('Outside both', 0) / totals['Total mapped']
-        if agricultural['safdz'].area:
-            totals['Share of provincial SAFDZ (%)'] = 1_000_000 * totals.get('Agricultural SAFDZ', 0) / agricultural['safdz'].area
+        safdz_ha = qa['agricultural_zone_area_ha'].get('safdz', 0)
+        if safdz_ha:
+            totals['Share of provincial SAFDZ (%)'] = 100 * totals.get('Agricultural SAFDZ', 0) / safdz_ha
     bounds = list(province.to_crs('EPSG:4326').total_bounds)
     result = {'province': row['name'], 'region': row['region'], 'mode': mode, 'bounds': bounds,
               'stats': stats, 'qa': qa, 'features': len(frame), 'colors': COLORS}
