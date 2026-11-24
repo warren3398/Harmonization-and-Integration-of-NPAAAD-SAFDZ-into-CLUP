@@ -2,9 +2,8 @@
 import json
 import os
 import re
-from collections import defaultdict
-from functools import lru_cache
-from math import floor, log10
+from collections import OrderedDict, defaultdict
+from math import floor, isfinite, log10
 from pathlib import Path
 
 import geopandas as gpd
@@ -128,10 +127,49 @@ def source_schema(path, role):
     return layer, info, field
 
 
-def source_rows(path, role, province, qa, check, wanted=None):
-    layer, info, field = source_schema(path, role)
-    bbox = tuple(province.to_crs(info['crs']).total_bounds)
-    bound = province.geometry.union_all()
+def source_batches(path, layer, columns, bbox, batch_size, check, stream):
+    if stream:
+        # Read the spatially filtered layer once. Reopening with larger offsets
+        # repeatedly walks earlier matches in GeoPackage layers.
+        with pyogrio.open_arrow(path, layer=layer, columns=columns, bbox=bbox,
+                                batch_size=batch_size, use_pyarrow=True) as (meta, reader):
+            geometry = meta['geometry_name'] or 'wkb_geometry'
+            for batch in reader:
+                check()
+                frame = batch.to_pandas(ignore_metadata=True)
+                shapes = sh.force_2d(sh.from_wkb(frame.pop(geometry).to_numpy()))
+                yield gpd.GeoDataFrame(frame, geometry=shapes, crs=meta['crs'])
+        return
+    offset = 0
+    while True:
+        check()
+        batch = pyogrio.read_dataframe(path, layer=layer, columns=columns, bbox=bbox,
+                                        skip_features=offset, max_features=batch_size, force_2d=True)
+        if batch.empty:
+            return
+        yield batch
+        if len(batch) < batch_size:
+            return
+        offset += len(batch)
+
+
+def projected_bounds(province, crs, cache):
+    if crs not in cache:
+        cache[crs] = tuple(province.to_crs(crs).total_bounds)
+    return cache[crs]
+
+
+def bounds_overlap(left, right):
+    return left[0] <= right[2] and right[0] <= left[2] and left[1] <= right[3] and right[1] <= left[3]
+
+
+def source_rows(path, role, province, qa, check, wanted=None, *, schema=None,
+                bbox=None, bound=None, stream=False):
+    layer, info, field = schema if schema is not None else source_schema(path, role)
+    if bbox is None:
+        bbox = tuple(province.to_crs(info['crs']).total_bounds)
+    if bound is None:
+        bound = province.geometry.union_all()
     # A source polygon can span the whole province even for a municipal query.
     # Keep a margin around the requested extent before expensive reprojection
     # and topology repair. The final overlay still uses the exact boundary.
@@ -139,18 +177,8 @@ def source_rows(path, role, province, qa, check, wanted=None):
     margin = max(xmax - xmin, ymax - ymin) * .25
     clip_bounds = (xmin - margin, ymin - margin, xmax + margin, ymax + margin)
     extra = [f for f in info['fields'] if f != field and f.upper() in {'MUN_NAME', 'ORIG_FID', 'LU_CODE', 'LANDUSE_CODE'}]
-    # Use the GeoPackage spatial index before fetching geometry. Seek by FID
-    # across batches so a large part cannot make memory grow with feature count.
     batch_size = 24 if role == 'landuse' else 2
-    offset = 0
-    while True:
-        check()
-        batch = pyogrio.read_dataframe(path, layer=layer, columns=[field, *extra], bbox=bbox,
-                                        skip_features=offset, max_features=batch_size, force_2d=True)
-        if batch.empty:
-            break
-        count = len(batch)
-        offset += count
+    for batch in source_batches(path, layer, [field, *extra], bbox, batch_size, check, stream):
         if wanted is not None:
             batch = batch[[wanted(str(record[field] or '').strip(), land_use_code({name: record[name] for name in extra}))
                            for record in batch[[field, *extra]].to_dict('records')]]
@@ -167,12 +195,11 @@ def source_rows(path, role, province, qa, check, wanted=None):
             geom = geom_polygon(geom)
             if geom.is_empty or not geom.intersects(bound):
                 continue
-            geom = geom_polygon(geom.intersection(bound))
+            if not stream or not bound.covers(geom):
+                geom = geom_polygon(geom.intersection(bound))
             if geom.area > 0:
                 raw = str(record.pop(field) or '').strip()
                 yield raw, geom, record
-        if count < batch_size:
-            break
 
 
 def zone_masks(records, role, qa, check, measure=True):
@@ -260,7 +287,7 @@ def zone_tables(areas, crops):
                        'rows': rows, 'total': ['Total', *totals]})
     return tables
 
-def assessments(sources, row, mode, selected, out, progress, check, output=None, intermediate=False, focused=False):
+def assessments(sources, row, mode, selected, out, progress, check, output=None, intermediate=False, focused=False, archive_bounds=None):
     required = ('npaaad', 'safdz') if mode == 'combined' else (mode,)
     missing = [role.upper() for role in required if role not in row['zones']]
     if missing or not row['land']:
@@ -276,8 +303,12 @@ def assessments(sources, row, mode, selected, out, progress, check, output=None,
     boundary = province.geometry.union_all()
     if boundary.is_empty:
         raise DataError('The selected boundary has no valid polygon.')
+    streamed_land = archive_bounds is not None
+    if streamed_land:
+        sh.prepare(boundary)
     zone_files = {}
     zone_indices = {}
+    zone_schemas = {}
     for index, role in enumerate(required):
         meta = row['zones'][role]
         progress(10 + 12 * index, f'Retrieving {role.upper()} source')
@@ -302,8 +333,14 @@ def assessments(sources, row, mode, selected, out, progress, check, output=None,
                 if shape.intersects(cell):
                     yield (x, y), cell
 
-    @lru_cache(maxsize=3)
+    mask_cache = OrderedDict()
+    mask_coordinates = 0
+
     def tile_masks(tile, cell):
+        nonlocal mask_coordinates
+        if tile in mask_cache:
+            mask_cache.move_to_end(tile)
+            return mask_cache[tile][0]
         local = geom_polygon(boundary.intersection(cell))
         if local.is_empty:
             return {}
@@ -312,8 +349,13 @@ def assessments(sources, row, mode, selected, out, progress, check, output=None,
         tile_qa = {'repaired_geometries': 0, 'source_overlap_ha': {}}
         areas = {}
         for role, path in zone_files.items():
-            records = local_zone_rows(zone_indices[role], local) if role in zone_indices else (
-                source_rows(path, role, tile_province, tile_qa, check))
+            if role in zone_indices:
+                records = local_zone_rows(zone_indices[role], local)
+            else:
+                if role not in zone_schemas:
+                    zone_schemas[role] = source_schema(path, role)
+                records = source_rows(path, role, tile_province, tile_qa, check, schema=zone_schemas[role],
+                                      bound=local)
             masks[role], ag = zone_masks(records, role, tile_qa, check, measure=not focused)
             if ag is not None:
                 areas[role] = ag.area
@@ -322,6 +364,12 @@ def assessments(sources, row, mode, selected, out, progress, check, output=None,
             qa['repaired_geometries'] += tile_qa['repaired_geometries']
             for role, area in tile_qa['source_overlap_ha'].items():
                 qa['source_overlap_ha'][role] = qa['source_overlap_ha'].get(role, 0) + area
+        weight = sum(sh.get_num_coordinates(shape) for codes in masks.values() for shape in codes.values())
+        while mask_cache and (len(mask_cache) >= 64 or mask_coordinates + weight > 200_000):
+            _, (_, discarded) = mask_cache.popitem(last=False)
+            mask_coordinates -= discarded
+        mask_cache[tile] = masks, weight
+        mask_coordinates += weight
         return masks
 
     stats = defaultdict(lambda: defaultdict(float))
@@ -333,12 +381,28 @@ def assessments(sources, row, mode, selected, out, progress, check, output=None,
     matrix_areas = {role: defaultdict(lambda: defaultdict(float)) for role in required} if output == 'table' else {}
     store_geometry = not (focused and intermediate and output == 'table')
     total = len(row['land'])
+    bbox_cache = {}
     for index, meta in enumerate(sorted(row['land'], key=lambda m: m['Key'])):
         check()
         progress(35 + int(51 * index / total), f'Reading regional land use archive {index + 1} of {total}')
         qa['land_objects'].append({key: meta[key] for key in ('Key', 'ETag')})
+        archive_key = meta['Key'], meta['ETag']
+        known_bounds = archive_bounds.get(archive_key) if archive_bounds is not None else None
+        if known_bounds and all(not bounds_overlap(bounds, projected_bounds(province, crs, bbox_cache))
+                                for crs, bounds in known_bounds):
+            continue
+        extents = []
         for path in sources.land_files(meta, out):
-            for raw, geom, attrs in source_rows(path, 'landuse', province, qa, check):
+            schema = source_schema(path, 'landuse')
+            info = schema[1]
+            crs, extent = info['crs'], info['total_bounds']
+            bbox = projected_bounds(province, crs, bbox_cache)
+            extent = tuple(extent) if extent is not None and all(isfinite(value) for value in extent) else None
+            extents.append((crs, extent))
+            if archive_bounds is not None and extent is not None and not bounds_overlap(extent, bbox):
+                continue
+            for raw, geom, attrs in source_rows(path, 'landuse', province, qa, check, schema=schema,
+                                               bbox=bbox, bound=boundary, stream=streamed_land):
                 qa['land_polygons'] += 1
                 crop = crop_name(raw, aliases, land_use_code(attrs))
                 if not crop:
@@ -350,14 +414,16 @@ def assessments(sources, row, mode, selected, out, progress, check, output=None,
                 if selected and crop not in selected and not ('Rice' in selected and crop in RICE_TYPES):
                     continue
                 for tile, cell in cells(geom):
-                    portion = geom_polygon(geom.intersection(cell))
+                    portion = geom if streamed_land and cell.covers(geom) else geom_polygon(geom.intersection(cell))
                     if not portion.area:
                         continue
-                    remaining = geom_polygon(portion.difference(occupied.get(tile, Polygon())))
+                    previous = occupied.get(tile)
+                    remaining = (geom_polygon(portion.difference(previous))
+                                 if previous is not None and previous.intersects(portion) else portion)
                     qa['land_overlap_ha'] += max(0., portion.area - remaining.area) / 10000
                     if remaining.is_empty:
                         continue
-                    occupied[tile] = sh.union(occupied.get(tile, Polygon()), remaining)
+                    occupied[tile] = remaining if previous is None else sh.union(previous, remaining)
                     masks = tile_masks(tile, cell)
                     s = stats[crop]
                     for role, crop_areas in matrix_areas.items():
@@ -406,6 +472,9 @@ def assessments(sources, row, mode, selected, out, progress, check, output=None,
                                             'area_ha': area, 'data_year': '2020–2022', 'geometry': result})
                             if len(pending) >= 250:
                                 flush(pending, export_path)
+        # ZIP archives can contain several layers. Cache only a complete set of extents.
+        if archive_bounds is not None and all(extent is not None for _, extent in extents):
+            archive_bounds[archive_key] = extents
     flush(pending, export_path)
     qa['source_crop_labels'] = sorted(observed_crops)
     if store_geometry and not export_path.exists():
@@ -416,7 +485,8 @@ def assessments(sources, row, mode, selected, out, progress, check, output=None,
     qa['province_area_ha'] = qa['assessment_area_ha']
     occupied_area = sum(g.area for g in occupied.values()) / 10000
     occupied.clear()
-    tile_masks.cache_clear()
+    mask_cache.clear()
+    mask_coordinates = 0
     if focused:
         zone_indices.clear()
         qa['agricultural_zone_area_ha'] = {}
@@ -425,7 +495,8 @@ def assessments(sources, row, mode, selected, out, progress, check, output=None,
             if tile not in measured:
                 check()
                 tile_masks(tile, cell)
-                tile_masks.cache_clear()
+                mask_cache.clear()
+                mask_coordinates = 0
         qa['agricultural_zone_area_ha'] = {role: sum(v.get(role, 0) for v in measured.values()) / 10000
                                           for role in required}
     qa['area_reconciliation_ha'] = abs(sum(s['Total mapped'] for s in stats.values()) -
@@ -691,6 +762,7 @@ def regional_assessment(sources, rows, region, mode, selected, out, progress, ch
     if not eligible:
         raise DataError('Required GIS layers are missing for this region.')
     target = out / 'assessment.gpkg'
+    archive_bounds = {} if focused and output == 'table' else None
     for index, row in enumerate(eligible):
         check()
         def stage(value, message):
@@ -699,7 +771,8 @@ def regional_assessment(sources, rows, region, mode, selected, out, progress, ch
 
         with tempfile_directory(out) as temp:
             folder = Path(temp)
-            result = assessments(sources, row, mode, selected, folder, stage, check, output, intermediate=True, focused=focused)
+            result = assessments(sources, row, mode, selected, folder, stage, check, output, intermediate=True, focused=focused,
+                                 archive_bounds=archive_bounds)
             feature_count += result['features']
             if result['features'] and not (focused and output == 'table'):
                 frame = pyogrio.read_dataframe(folder / 'assessment.gpkg')
