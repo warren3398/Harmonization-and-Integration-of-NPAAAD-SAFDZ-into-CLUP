@@ -26,18 +26,21 @@ def font(size, bold=False):
 
 
 def satellite_image(bounds, size):
-    params = urlencode({'bbox': ','.join(map(str, bounds)), 'bboxSR': 3857, 'imageSR': 3857,
-                        'size': f'{size[0]},{size[1]}', 'format': 'jpg', 'f': 'image'})
-    url = 'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/export?' + params
-    try:
-        with urlopen(url, timeout=12) as response:
-            data = response.read(15_000_001)
-        if len(data) > 15_000_000:
-            return None
-        with Image.open(BytesIO(data)) as image:
-            return image.convert('RGB').resize(size, Image.Resampling.LANCZOS)
-    except (OSError, ValueError):
-        return None
+    for host, pixel_width in (('server.arcgisonline.com', size[0]), ('services.arcgisonline.com', 1280),
+                              ('server.arcgisonline.com', 1024)):
+        pixel_height = round(pixel_width * size[1] / size[0])
+        params = urlencode({'bbox': ','.join(map(str, bounds)), 'bboxSR': 3857, 'imageSR': 3857,
+                            'size': f'{pixel_width},{pixel_height}', 'format': 'jpg', 'f': 'image'})
+        url = f'https://{host}/ArcGIS/rest/services/World_Imagery/MapServer/export?' + params
+        try:
+            with urlopen(url, timeout=10) as response:
+                data = response.read(15_000_001)
+            if len(data) <= 15_000_000:
+                with Image.open(BytesIO(data)) as image:
+                    return image.convert('RGB').resize(size, Image.Resampling.LANCZOS)
+        except (OSError, ValueError):
+            continue
+    return None
 
 
 def draw_scale(draw, bounds, step):
