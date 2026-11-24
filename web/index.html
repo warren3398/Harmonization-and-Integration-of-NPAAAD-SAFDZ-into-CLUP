@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Provincial Crop-Based Land Use Assessment Map</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" crossorigin="">
+<link rel="stylesheet" href="style.css">
+<script defer src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
+<script defer src="app.js"></script>
+</head>
+<body>
+<header><div class="brand"><span class="symbol" aria-hidden="true">◈</span><span>ALMED <small> / GIS TOOLS</small></span></div><span class="period">Land Use 2020–2022</span></header>
+<main>
+<section class="intro"><div><h1>Provincial Crop-Based<br>Land Use Assessment Map</h1><p>Compare mapped crop areas with agricultural NPAAAD and SAFDZ boundaries.</p></div></section>
+<div class="workspace">
+<aside>
+<h2>Assessment setup</h2>
+<form id="settings">
+<label for="region">Region</label><select id="region" required><option value="">Loading GIS catalog…</option></select>
+<label for="province">Province</label><select id="province" required disabled><option value="">Choose a region</option></select>
+<label for="crops">Crop classification</label><details id="crop-picker"><summary id="crop-label">All mapped crops</summary><div id="crops"></div></details>
+<label for="mode">Assessment type</label><select id="mode"><option value="combined">Combined NPAAAD–SAFDZ</option><option value="npaaad">Crop-Based NPAAAD</option><option value="safdz">Crop-Based SAFDZ</option></select>
+<p id="availability"></p>
+<button id="run" type="submit" disabled>Run assessment <span aria-hidden="true">→</span></button>
+</form>
+<div id="job" hidden><progress max="100" value="0"></progress><p id="status" role="status"></p><button type="button" id="cancel">Cancel assessment</button></div>
+</aside>
+<section class="panel" aria-label="Assessment map">
+<div class="panel-head"><div><h2>Assessment map</h2><p id="map-title">Philippines</p></div><span id="badge">OVERVIEW</span></div>
+<div id="map" aria-label="Interactive map of the Philippines"></div><div id="legend" aria-label="Map legend"></div>
+</section>
+</div>
+<section id="results" class="panel results" hidden>
+<div class="panel-head"><div><h2>Crop area statistics</h2><p id="result-note"></p></div></div>
+<div id="cards"></div><div id="chart" aria-label="Top mapped crops by hectares"></div>
+<div class="matrix"><table id="matrix"></table></div>
+<div class="downloads"><h3>Downloads</h3><div id="exports"></div></div>
+</section>
+</main>
+<footer>Philippine Land Use 2020–2022 · NPAAAD · SAFDZ · Administrative boundaries</footer>
+</body></html>

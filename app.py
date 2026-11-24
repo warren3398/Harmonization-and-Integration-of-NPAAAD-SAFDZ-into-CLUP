@@ -1,1308 +1,156 @@
-import os, io, zipfile, tempfile, shutil, json, threading, time, uuid, traceback
+import logging
+import shutil
+import tempfile
+import time
+import uuid
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from flask import Flask, render_template, request, send_file, jsonify, session, redirect, url_for
-import pandas as pd
-import geopandas as gpd
-from shapely.geometry import Polygon, MultiPolygon, GeometryCollection
-from shapely.ops import unary_union
-try:
-    from shapely import make_valid
-except ImportError:
-    from shapely.validation import make_valid
-from openpyxl import Workbook
-from openpyxl.styles import Font, PatternFill, Border, Side, Alignment
-from openpyxl.utils import get_column_letter
-from functools import wraps
-from werkzeug.security import check_password_hash
-import boto3
-from botocore.config import Config
+from threading import Event, Lock
+from typing import Literal
 
-import runtime_limits
+from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel, Field
+import os
 
-app = Flask(__name__)
-app.secret_key = os.environ.get('ALRMS_SESSION_SECRET', os.urandom(32))
-app.config.update(SESSION_COOKIE_HTTPONLY=True, SESSION_COOKIE_SAMESITE='Lax',
-                  SESSION_COOKIE_SECURE=bool(os.environ.get('RENDER')))
-LOGIN_USERNAME = os.environ.get('ALRMS_USERNAME', 'ALRMS')
-DEFAULT_PASSWORD_HASH = 'pbkdf2:sha256:600000$alrms-v27-local$52d29729841c4eb54914bc5b24bea26e44050e1e7e77957f7e5238049d3ce4c5'
-LOGIN_PASSWORD_HASH = os.environ.get('ALRMS_PASSWORD_HASH', DEFAULT_PASSWORD_HASH)
-if os.environ.get('RENDER') and not os.environ.get('ALRMS_PASSWORD_HASH'):
-    raise RuntimeError('Set ALRMS_PASSWORD_HASH in Render')
+from assessment import CROPS, EXPORTS, assessments
+from sources import DataError, Sources
 
-def login_required(fn):
-    @wraps(fn)
-    def wrapped(*args, **kwargs):
-        if not session.get('logged_in'):
-            if request.path.startswith(('/progress', '/process', '/inspect', '/api/gis-status')):
-                return jsonify({'error':'Login required.'}), 401
-            return redirect(url_for('login', next=request.path))
-        return fn(*args, **kwargs)
-    return wrapped
+app = FastAPI(title='Provincial Crop-Based Land Use Assessment Map')
+if os.getenv('PCLAM_WEB_ORIGIN'):
+    app.add_middleware(CORSMiddleware, allow_origins=[os.environ['PCLAM_WEB_ORIGIN']],
+                       allow_methods=['GET', 'POST', 'DELETE'], allow_headers=['Content-Type'])
+sources = Sources()
+catalog_lock = Lock()
+job_lock = Lock()
+jobs = {}
+executor = ThreadPoolExecutor(max_workers=1)
+logger = logging.getLogger('pclam')
 
 
-@app.after_request
-def no_cache(response):
-    response.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate, max-age=0'
-    response.headers['Pragma'] = 'no-cache'
-    response.headers['Expires'] = '0'
-    return response
+class Request(BaseModel):
+    province: str = Field(min_length=1, max_length=32)
+    mode: Literal['npaaad', 'safdz', 'combined']
+    crops: list[str] = Field(default_factory=list, max_length=len(CROPS))
 
-app.config['MAX_CONTENT_LENGTH'] = 256 * 1024 * 1024
 
-@app.errorhandler(413)
-def upload_too_large(error):
-    return jsonify({'error':'Upload exceeds the 256 MB request limit. Split the ELU into smaller areas or simplify the source files.'}),413
+class Cancelled(Exception):
+    pass
 
-WORK_ROOT = Path(tempfile.gettempdir()) / 'npaaad_clup_harmonizer'
-WORK_ROOT.mkdir(exist_ok=True)
-# Recover scratch files left by a killed worker before accepting new GIS work.
-runtime_limits.cleanup()
 
-SAFDZ_ORDER = ['1','2','3','4','5','6','7','8','9','10','BU','WB','Others']
-NPAAAD_ORDER = ['A','B','C','D','E','F','G','H','BU','WB','Others']
-NPAAAD_AGR = {'A','B','C','D','E','G'}
-SAFDZ_AGR = {'1','2','3','4','5','6','7'}
-
-SAFDZ_DESC = {
- '1':'Strategic Crop Sub-Development Zone','2':'Strategic Livestock Sub-Development Zone','3':'Strategic Fishery Sub-Development Zone',
- '4':'Strategic Integrated Crop/Livestock Sub-Development Zone','5':'Strategic Integrated Crop/Fishery Sub-Development Zone',
- '6':'Strategic Integrated Crop/Livestock/Fishery Sub-Development Zone','7':'Strategic Integrated Fishery and Livestock Sub-Development Zone',
- '8':'Remaining NPAAAD','9':'Agro-Forestry Zone','10':'Forest/Watershed areas (critical watersheds including mangroves)',
- 'BU':'Built-up areas (urban land, airport, roads and bridges)','Others':'Quarry, mine pit, barren land, rock land, river wash, landfill','WB':'Water Bodies'}
-NPAAAD_DESC = {
- 'A':'All irrigated lands/areas','B':'All irrigable lands already covered by irrigation projects with firm funding commitments',
- 'C':'All alluvial plain lands highly suitable for agriculture, not irrigated',
- 'D':'Agro-industrial croplands or lands presently planted to industrial crops that support existing agricultural infrastructure and agro-based enterprises',
- 'E':'Highlands or areas at an elevation of 500 meters or above highly suitable for growing semi-temperate and high-value crops',
- 'F':'Ecologically fragile agricultural lands where conversion may cause serious environmental degradation affecting mangroves and fish sanctuaries',
- 'G':'All fishery areas as defined pursuant to Fisheries Code of 1998','H':'Forest/Watershed areas (critical watersheds including mangroves)',
- 'BU':'Built-up areas (urban land, airport, roads and bridges)','Others':'Quarry, mine pit, barren land, rock land, river wash, beach sand, sand dunes, landfill'}
-
-
-def extract_shapefile_zip(upload, dest: Path):
-    dest.mkdir(parents=True, exist_ok=True)
-    zpath = dest / 'upload.zip'
-    upload.save(zpath)
-    with zipfile.ZipFile(zpath, 'r') as z:
-        runtime_limits.extract_checked(z,dest)
-    shp_files = list(dest.rglob('*.shp'))
-    if not shp_files:
-        raise ValueError(f'No .shp found in {upload.filename}')
-    return shp_files[0]
-
-
-def inspect_uploaded_shapefile(upload, dest: Path, role='elu', selected=None):
-    """Inspect metadata and only the chosen class, not every attribute column."""
-    import pyogrio
-    shp=extract_shapefile_zip(upload,dest)
-    info=pyogrio.read_info(shp)
-    fields=list(info['fields'])
-    chosen=selected if selected in fields else suggest_field(fields,role)
-    gdf=gpd.read_file(shp,columns=[chosen] if chosen else [],**({'rows':1} if role=='poultry' else {}))
-    return gdf,{'filename':upload.filename,'crs':str(gdf.crs) if gdf.crs else None,
-                'epsg':gdf.crs.to_epsg() if gdf.crs else None,
-                'authority':(':'.join(map(str,gdf.crs.to_authority())) if gdf.crs and gdf.crs.to_authority() else None),
-                'geometry_types':sorted(str(value) for value in gdf.geom_type.dropna().unique()),
-                'feature_count':int(info['features']),'fields':fields}
-
-
-def field_preview(gdf, field, limit=12):
-    if not field or field not in gdf.columns:
-        return []
-    vals = gdf[field].dropna().astype(str).str.strip()
-    vals = vals[vals != ''].drop_duplicates().head(limit).tolist()
-    return vals
-
-
-def suggest_field(fields, role):
-    aliases = {
-        'elu': ['ELU','EXISTING_LAND_USE','EXIST_LU','LANDUSE','LAND_USE','DESCRIPT','DESCRIPTION','CLASS'],
-        'clup': ['CLUP','PROPOSED_LAND_USE','PROPOSED','PLU','LANDUSE','LAND_USE','DESCRIPT','DESCRIPTION','CLASS'],
-        'npaaad': ['NPAAAD','NPAAAD_CL','NPAAAD_CLASS','CLASS','DESCRIPT','DESCRIPTION'],
-        'safdz': ['SAFDZ','SAFDZ_CL','SAFDZ_CLASS','CLASS','DESCRIPT','DESCRIPTION'],
-        'landcover': ['CLASS','LANDCOVER','LAND_COVER','LC_CLASS','LC_TYPE','DESCRIPT','DESCRIPTION'],
-    }
-    upper = {str(f).upper(): f for f in fields}
-    for name in aliases.get(role, []):
-        if name in upper:
-            return upper[name]
-    # Prefer text/category-looking fields rather than IDs/area fields.
-    for f in fields:
-        u = str(f).upper()
-        if not any(x in u for x in ['OBJECTID','FID','SHAPE','AREA','LENGTH','PERIMETER']):
-            return f
-    return fields[0] if fields else None
-
-
-def _polygon_part(geom):
-    """Return polygonal content only.
-
-    make_valid/clip/overlay can turn an invalid polygon into a GeometryCollection
-    containing polygons, lines and points. GeoPandas overlay requires every input
-    GeoDataFrame to contain one basic geometry family, so non-polygon remnants
-    must be removed before the next overlay.
-    """
-    if geom is None or geom.is_empty:
-        return None
-    if isinstance(geom, (Polygon, MultiPolygon)):
-        return geom
-    if isinstance(geom, GeometryCollection):
-        parts = []
-        for part in geom.geoms:
-            pg = _polygon_part(part)
-            if pg is None or pg.is_empty:
-                continue
-            if isinstance(pg, Polygon):
-                parts.append(pg)
-            elif isinstance(pg, MultiPolygon):
-                parts.extend(list(pg.geoms))
-        if not parts:
-            return None
-        merged = unary_union(parts)
-        return merged if isinstance(merged, (Polygon, MultiPolygon)) else None
-    # Lines/points have no area and are not valid inputs for this polygon workflow.
-    return None
-
-
-def normalize_polygon_gdf(gdf: gpd.GeoDataFrame):
-    """Make geometries valid and force a polygon-only GeoDataFrame."""
-    gdf = gdf.copy()
-    gdf = gdf[gdf.geometry.notnull()].copy()
-
-    def _fix(g):
-        if g is None or g.is_empty:
-            return None
-        try:
-            g = make_valid(g) if not g.is_valid else g
-        except Exception:
-            pass
-        return _polygon_part(g)
-
-    gdf['geometry'] = gdf.geometry.apply(_fix)
-    gdf = gdf[gdf.geometry.notnull() & ~gdf.geometry.is_empty].copy()
-    # Explode MultiPolygons to simple Polygon records. This prevents mixed
-    # Polygon/MultiPolygon exports and makes subsequent overlays more reliable.
-    if not gdf.empty:
-        gdf = gdf.explode(index_parts=False, ignore_index=True)
-        gdf = gdf[gdf.geom_type == 'Polygon'].copy()
-    return gdf
-
-
-def clean_gdf(gdf: gpd.GeoDataFrame, keep_fields=None):
-    gdf = normalize_polygon_gdf(gdf)
-    if keep_fields:
-        cols = [c for c in keep_fields if c in gdf.columns] + ['geometry']
-        gdf = gdf[cols]
-    return gdf
-
-
-def safe_reproject(gdf, target_crs):
-    if gdf.crs is None:
-        raise ValueError('A layer has no CRS (.prj missing or unreadable).')
-    # Avoid an expensive coordinate transformation when the layer already uses
-    # the authoritative NPAAAD/SAFDZ CRS.
-    if gdf.crs.equals(target_crs):
-        return gdf
-    return gdf.to_crs(target_crs)
-
-
-def fast_prepare(gdf, field, target_crs):
-    """Keep only the category + geometry, reproject once, repair only invalid rows."""
-    if field not in gdf.columns:
-        raise ValueError(f'Field "{field}" not found.')
-    gdf = gdf[[field, 'geometry']].copy()
-    gdf = gdf[gdf.geometry.notnull() & ~gdf.geometry.is_empty].copy()
-    gdf[field] = gdf[field].astype(str).str.strip()
-    gdf = safe_reproject(gdf, target_crs)
-    # Critical performance change: valid polygons are left untouched.  v1.8
-    # called Python/Shapely once for every feature, which made the 5% stage slow.
-    valid = gdf.geometry.is_valid
-    if not bool(valid.all()):
-        bad = ~valid
-        gdf.loc[bad, 'geometry'] = gdf.loc[bad, 'geometry'].apply(lambda g: _polygon_part(make_valid(g)))
-        gdf = gdf[gdf.geometry.notnull() & ~gdf.geometry.is_empty].copy()
-    return gdf
-
-
-def fast_qa(gdf):
-    """Cheap QA for live processing; expensive overlap scans are intentionally omitted."""
-    try:
-        invalid = int((~gdf.geometry.is_valid).sum())
-    except Exception:
-        invalid = -1
-    return {'invalid': invalid, 'features': int(len(gdf))}
-
-
-def detect_geometry_issues(gdf):
-    invalid = int((~gdf.geometry.is_valid).sum())
-    duplicates = int(gdf.geometry.apply(lambda g: g.wkb if g is not None else None).duplicated().sum())
-    # Overlaps: spatial index based, unique pairs only
-    overlaps = 0
-    try:
-        sindex = gdf.sindex
-        seen = set()
-        for i, geom in enumerate(gdf.geometry):
-            if geom is None or geom.is_empty:
-                continue
-            for j in sindex.intersection(geom.bounds):
-                if j <= i: continue
-                key = (i,j)
-                if key in seen: continue
-                seen.add(key)
-                try:
-                    inter = geom.intersection(gdf.geometry.iloc[j])
-                    if not inter.is_empty and inter.area > 0:
-                        overlaps += 1
-                except Exception:
-                    pass
-    except Exception:
-        overlaps = -1
-    holes = 0
-    for geom in gdf.geometry:
-        if isinstance(geom, Polygon):
-            holes += len(geom.interiors)
-        elif isinstance(geom, MultiPolygon):
-            holes += sum(len(p.interiors) for p in geom.geoms)
-    return {'invalid': invalid, 'duplicate_geometries': duplicates, 'overlap_pairs': overlaps, 'interior_holes': holes}
-
-
-def dissolve_by_field(gdf, field):
-    if field not in gdf.columns:
-        raise ValueError(f'Field "{field}" not found.')
-    gdf = gdf[[field, 'geometry']].copy()
-    gdf[field] = gdf[field].astype(str).str.strip()
-    out = gdf.dissolve(by=field, as_index=False)
-    return normalize_polygon_gdf(out)
-
-
-
-
-def fast_split_overlay(base, overlay, class_field):
-    """Split base polygons only where an overlay actually intersects.
-
-    Faster than a full union for this workflow because overlay is already clipped
-    to the ELU boundary. We compute (1) intersections carrying the overlay class
-    and (2) untouched base remainders outside the overlay coverage, then append.
-    No outside-of-ELU union pieces are generated.
-    """
-    base = normalize_polygon_gdf(base)
-    overlay = normalize_polygon_gdf(overlay[[class_field, 'geometry']].copy())
-    if overlay.empty:
-        out = base.copy()
-        if class_field not in out.columns:
-            out[class_field] = pd.NA
-        return out
-
-    # Spatial-indexed intersection creates only candidate pairs that overlap.
-    inter = gpd.overlay(base, overlay, how='intersection', keep_geom_type=True)
-    inter = normalize_polygon_gdf(inter)
-
-    # Keep the portions of base that are not covered by this overlay. Because the
-    # overlay was dissolved by classification first, union_all is very small.
-    try:
-        coverage = overlay.geometry.union_all()
-    except AttributeError:
-        coverage = overlay.geometry.unary_union
-    rem = base.copy()
-    rem.geometry = rem.geometry.difference(coverage)
-    rem = normalize_polygon_gdf(rem)
-    if class_field not in rem.columns:
-        rem[class_field] = pd.NA
-
-    if inter.empty:
-        return rem
-    out = pd.concat([inter, rem], ignore_index=True, sort=False)
-    return normalize_polygon_gdf(gpd.GeoDataFrame(out, geometry='geometry', crs=base.crs))
-
-
-def write_excel(summary_df, union_df, qa, out_path, poultry_by_elu=None):
-    wb = Workbook()
-    ws = wb.active
-    ws.title = 'Summary'
-    qa_ws = wb.create_sheet('QA_QC')
-    attr_ws = wb.create_sheet('Union_Attribute_Table')
-
-    title_fill = PatternFill('solid', fgColor='1F4E78')
-    header_fill = PatternFill('solid', fgColor='D9EAF7')
-    total_fill = PatternFill('solid', fgColor='E2F0D9')
-    special_fill = PatternFill('solid', fgColor='FFF2CC')
-    white_font = Font(color='FFFFFF', bold=True, size=12)
-    bold_font = Font(bold=True)
-    thin = Side(style='thin', color='B7B7B7')
-    border = Border(left=thin, right=thin, top=thin, bottom=thin)
-
-    def add_matrix(start_row, title, matrix, extra_cols, descriptions=None, poultry_by_elu=None):
-        descriptions = descriptions or {}
-        last_col = 1 + len(matrix.columns) + 1 + len(extra_cols)
-        ws.merge_cells(start_row=start_row, start_column=1, end_row=start_row, end_column=last_col)
-        c = ws.cell(start_row, 1, title); c.fill=title_fill; c.font=white_font; c.alignment=Alignment(horizontal='center')
-        r = start_row + 1
-        ws.cell(r,1,'ELU').font=bold_font
-        for j,col in enumerate(matrix.columns,start=2): ws.cell(r,j,str(col)).font=bold_font
-        gt_col=2+len(matrix.columns); ws.cell(r,gt_col,'Grand Total').font=bold_font
-        for k,ex in enumerate(extra_cols,start=gt_col+1): ws.cell(r,k,ex).font=bold_font
-        for j in range(1,last_col+1): ws.cell(r,j).fill=header_fill; ws.cell(r,j).border=border
-        # Description row directly below the category codes.
-        dr=r+1; ws.cell(dr,1,'Description').font=bold_font
-        for j,col in enumerate(matrix.columns,start=2):
-            ws.cell(dr,j,descriptions.get(str(col).strip().upper(),'')); ws.cell(dr,j).alignment=Alignment(wrap_text=True,vertical='top')
-        ws.cell(dr,gt_col,'Area total (ha)')
-        for k,ex in enumerate(extra_cols,start=gt_col+1):
-            if ex=='Aglng-SZ': txt='SAFDZ 2 — Strategic Livestock Sub-Development Zone'
-            elif ex=='PTA-SZ': txt='NPAAAD A, B, D, E, F, G'
-            elif ex=='PDA-SZ': txt='NPAAAD C'
-            elif ex=='Poultry Area (ha)': txt='Poultry shapefile area clipped within each ELU category'
-            else: txt=''
-            ws.cell(dr,k,txt); ws.cell(dr,k).alignment=Alignment(wrap_text=True,vertical='top')
-        for j in range(1,last_col+1): ws.cell(dr,j).border=border
-        ws.row_dimensions[dr].height=45
-        rr=dr+1
-        for idx,row in matrix.iterrows():
-            ws.cell(rr,1,str(idx)); vals=[]
-            for j,col in enumerate(matrix.columns,start=2):
-                v=float(row[col]) if pd.notna(row[col]) else 0; ws.cell(rr,j,v); vals.append(v)
-            ws.cell(rr,gt_col,sum(vals))
-            for k,ex in enumerate(extra_cols,start=gt_col+1):
-                if title.startswith('SAFDZ') and ex=='Aglng-SZ': v=float(row.get('2',0) or 0)
-                elif title.startswith('NPAAAD') and ex=='PTA-SZ': v=sum(float(row.get(x,0) or 0) for x in ['A','B','D','E','F','G'])
-                elif title.startswith('NPAAAD') and ex=='PDA-SZ': v=float(row.get('C',0) or 0)
-                elif ex=='Poultry Area (ha)': v=float((poultry_by_elu or {}).get(str(idx),0) or 0)
-                else: v=0
-                ws.cell(rr,k,v)
-            for j in range(1,last_col+1):
-                ws.cell(rr,j).border=border
-                if j>1: ws.cell(rr,j).number_format='#,##0.000'
-            rr+=1
-        ws.cell(rr,1,'Grand Total').font=bold_font
-        for j,col in enumerate(matrix.columns,start=2): ws.cell(rr,j,float(matrix[col].sum()))
-        ws.cell(rr,gt_col,float(matrix.to_numpy().sum()))
-        for k,ex in enumerate(extra_cols,start=gt_col+1):
-            if title.startswith('SAFDZ') and ex=='Aglng-SZ': v=float(matrix['2'].sum()) if '2' in matrix.columns else 0
-            elif title.startswith('NPAAAD') and ex=='PTA-SZ': v=sum(float(matrix[x].sum()) for x in ['A','B','D','E','F','G'] if x in matrix.columns)
-            elif title.startswith('NPAAAD') and ex=='PDA-SZ': v=float(matrix['C'].sum()) if 'C' in matrix.columns else 0
-            elif ex=='Poultry Area (ha)': v=sum(float(x) for x in (poultry_by_elu or {}).values())
-            else: v=0
-            ws.cell(rr,k,v)
-        for j in range(1,last_col+1):
-            ws.cell(rr,j).fill=total_fill; ws.cell(rr,j).border=border
-            if j>1: ws.cell(rr,j).number_format='#,##0.000'
-        # Emphasize derived columns.
-        for k,ex in enumerate(extra_cols,start=gt_col+1):
-            for rownum in range(r,rr+1): ws.cell(rownum,k).fill=special_fill if rownum!=rr else total_fill
-        return rr
-
-    saf = summary_df['safdz']
-    npaaad = summary_df['npaaad']
-    end1 = add_matrix(1, 'SAFDZ — ELU Area Matrix (ha)', saf, ['Aglng-SZ'], SAFDZ_DESC)
-    add_matrix(end1+3, 'NPAAAD — ELU Area Matrix (ha)', npaaad, ['PTA-SZ','PDA-SZ','Poultry Area (ha)'], NPAAAD_DESC, poultry_by_elu)
-    ws.freeze_panes = 'B3'
-    ws.column_dimensions['A'].width = 26
-    for i in range(2, 24): ws.column_dimensions[get_column_letter(i)].width = 22
-
-    # QA/QC sheet
-    qa_ws.append(['Layer','Check','Value'])
-    for c in qa_ws[1]: c.fill = header_fill; c.font = bold_font; c.border = border
-    for layer,items in qa.items():
-        for key,val in items.items():
-            qa_ws.append([layer,key,json.dumps(val,ensure_ascii=False) if isinstance(val,(dict,list)) else val])
-    for row in qa_ws.iter_rows():
-        for c in row: c.border = border
-    qa_ws.column_dimensions['A'].width=20; qa_ws.column_dimensions['B'].width=28; qa_ws.column_dimensions['C'].width=18
-
-    # Attribute sheet
-    df = union_df.drop(columns='geometry', errors='ignore').copy()
-    for c in df.columns:
-        if pd.api.types.is_datetime64_any_dtype(df[c]):
-            df[c] = df[c].astype(str)
-    attr_ws.append(list(df.columns))
-    for c in attr_ws[1]: c.fill = header_fill; c.font = bold_font; c.border = border
-    for row in df.itertuples(index=False, name=None):
-        attr_ws.append([None if pd.isna(v) else v for v in row])
-    for row in attr_ws.iter_rows():
-        for c in row: c.border = border
-    # Format hectare fields consistently.
-    for idx, name in enumerate(df.columns, start=1):
-        if str(name).upper().endswith('AREA_HA') or str(name).upper() == 'AREA_HA':
-            for r in range(2, attr_ws.max_row + 1):
-                attr_ws.cell(r, idx).number_format = '#,##0.000'
-    attr_ws.freeze_panes='A2'
-
-    wb.save(out_path)
-
-
-@app.route('/login', methods=['GET', 'POST'])
-def login():
-    # Return users to the requested module after authentication.
-    # Allow only known local destinations to prevent open redirects.
-    destination = request.values.get('next', '')
-    if destination not in ('/', '/eo79', '/harmonizer'):
-        destination = url_for('index')
-    if session.get('logged_in'):
-        return redirect(destination)
-    error = None
-    if request.method == 'POST':
-        username = request.form.get('username', '').strip()
-        password = request.form.get('password', '')
-        if username == LOGIN_USERNAME and check_password_hash(LOGIN_PASSWORD_HASH, password):
-            session.clear(); session['logged_in'] = True; session['username'] = username
-            return redirect(destination)
-        error = 'Invalid username or password.'
-    return render_template('login.html', error=error, destination=destination)
-
-@app.route('/logout')
-def logout():
-    session.clear()
-    return redirect(url_for('login'))
-
-@app.route('/')
-@login_required
-def portal_home():
-    return render_template('portal_home.html')
-
-@app.route('/harmonizer')
-@login_required
-def index():
-    return render_template('index.html')
-
-
-@app.route('/api/eo79/safdz/<island>/<province>')
-def eo79_safdz(island,province):
-    """Server-side GeoPackage access for EO79 parcel intersection, without manifests."""
-    import re
-    from shapely.geometry import shape, mapping
-    if island not in ('luzon','visayas','mindanao') or not re.fullmatch(r'[a-z0-9-]{2,60}',province):
-        return jsonify({'error':'Invalid province'}),400
-    try:
-        key=f'nationwide/{island}/{province}/safdz.gpkg'
-        cache=WORK_ROOT/'eo79_r2'/island/(province+'.gpkg')
-        if not cache.exists(): r2_download(key,cache)
-        bbox_text=request.args.get('bbox','')
-        if not bbox_text:
-            return jsonify({'error':'bbox required: west,south,east,north'}),400
-        coords=[float(v) for v in bbox_text.split(',')]
-        if len(coords)!=4 or not (-180<=coords[0]<coords[2]<=180 and -90<=coords[1]<coords[3]<=90):
-            return jsonify({'error':'Invalid bbox'}),400
-        import pyogrio
-        from shapely.geometry import box
-        bounds=box(*coords)
-        # pyogrio bbox is expressed in the source CRS; use geopandas read_file
-        # with WGS84 bbox transformed to the dataset CRS.
-        info=pyogrio.read_info(cache)
-        src_crs=info.get('crs')
-        if not src_crs: raise ValueError('SAFDZ dataset has no CRS')
-        query_bounds=gpd.GeoSeries([bounds],crs='EPSG:4326').to_crs(src_crs).total_bounds
-        data=gpd.read_file(cache,bbox=tuple(query_bounds)).to_crs('EPSG:4326')
-        data=data[data.intersects(bounds)].copy()
-        if len(data)>10000: return jsonify({'error':'Too many features; reduce bbox size'}),413
-        data['geometry']=data.geometry.intersection(bounds)
-        data=data[~data.geometry.is_empty]
-        return app.response_class(data.to_json(),mimetype='application/geo+json')
-    except Exception as e:
-        app.logger.exception('EO79 R2 SAFDZ load failed')
-        return jsonify({'error':str(e)}),502
-
-
-@app.route('/api/eo79/export-current-shapefile', methods=['POST'])
-def eo79_export_current_shapefile():
-    """Export the actual clipped SAFDZ GeoJSON already displayed in EO79."""
-    try:
-        payload = request.get_json(silent=True) or {}
-        features = payload.get('features', [])
-        if not isinstance(features, list) or not features or len(features) > 50000:
-            return jsonify({'error': 'No clipped SAFDZ polygons on the current map.'}), 400
-        gdf = gpd.GeoDataFrame.from_features(features, crs='EPSG:4326')
-        gdf = gdf[gdf.geometry.notna() & ~gdf.geometry.is_empty].copy()
-        gdf = gdf[gdf.geom_type.isin(('Polygon', 'MultiPolygon'))]
-        if gdf.empty:
-            return jsonify({'error': 'Current map contains no clipped SAFDZ polygons.'}), 400
-        gdf['AREA_HA'] = (gdf.to_crs('EPSG:6933').geometry.area / 10000).round(3)
-        import re
-        used = set()
-        names = {}
-        for col in gdf.columns:
-            if col == 'geometry': continue
-            base = re.sub('[^A-Za-z0-9_]', '_', str(col))[:10] or 'FIELD'
-            name = base
-            n = 1
-            while name.lower() in used:
-                suffix = str(n)
-                name = base[:10-len(suffix)] + suffix
-                n += 1
-            used.add(name.lower())
-            names[col] = name
-        gdf = gdf.rename(columns=names)
-        for col in gdf.columns:
-            if col != 'geometry' and str(gdf[col].dtype).startswith('datetime'):
-                gdf[col] = gdf[col].astype(str)
-        with tempfile.TemporaryDirectory(prefix='eo79_current_') as folder:
-            shp = Path(folder) / 'EO79_SAFDZ_Parcel_Clip.shp'
-            gdf.to_file(shp, driver='ESRI Shapefile', encoding='UTF-8', index=False)
-            output = io.BytesIO()
-            with zipfile.ZipFile(output, 'w', zipfile.ZIP_DEFLATED) as z:
-                for f in Path(folder).iterdir():
-                    z.write(f, f.name)
-            output.seek(0)
-            return send_file(output, mimetype='application/zip', as_attachment=True,
-                             download_name='EO79_SAFDZ_Parcel_Clip.zip')
-    except Exception:
-        app.logger.exception('Current EO79 shapefile export failed')
-        return jsonify({'error': 'Unable to export current clipped SAFDZ geometry.'}), 500
-
-
-@app.route('/api/eo79/clip-shapefile', methods=['POST'])
-def eo79_clip_shapefile():
-    """Clip provincial SAFDZ to uploaded parcel geometry and return a zipped shapefile."""
-    import re
-    island = request.form.get('island', '').lower().strip()
-    province = request.form.get('province', '').lower().strip()
-    if island not in ('luzon', 'visayas', 'mindanao') or not re.fullmatch(r'[a-z0-9-]{2,60}', province):
-        return jsonify({'error': 'Choose a valid SAFDZ province.'}), 400
-    upload = request.files.get('parcel')
-    if not upload or not upload.filename:
-        return jsonify({'error': 'Upload a parcel shapefile ZIP or GeoPackage.'}), 400
-    suffix = Path(upload.filename).suffix.lower()
-    if suffix not in ('.zip', '.gpkg', '.geojson', '.json'):
-        return jsonify({'error': 'Parcel format must be ZIP shapefile, GPKG, or GeoJSON.'}), 400
-    with tempfile.TemporaryDirectory(prefix='eo79_clip_') as tmp:
-        folder = Path(tmp)
-        try:
-            if suffix == '.zip':
-                zipped = folder / 'parcel.zip'
-                upload.save(zipped)
-                with zipfile.ZipFile(zipped) as z:
-                    for item in z.infolist():
-                        if item.is_dir(): continue
-                        target = (folder / 'parcel_files' / item.filename).resolve()
-                        root = (folder / 'parcel_files').resolve()
-                        if not target.is_relative_to(root):
-                            raise ValueError('Invalid parcel ZIP paths')
-                        if item.file_size > 250 * 1024 * 1024:
-                            raise ValueError('Parcel file is too large')
-                        target.parent.mkdir(parents=True, exist_ok=True)
-                        with z.open(item) as src, open(target, 'wb') as dst:
-                            shutil.copyfileobj(src, dst)
-                files = list((folder / 'parcel_files').rglob('*.shp'))
-                if not files: raise ValueError('No .shp in parcel ZIP')
-                parcel = gpd.read_file(files[0])
-            else:
-                path = folder / ('parcel' + suffix)
-                upload.save(path)
-                parcel = gpd.read_file(path)
-            if parcel.empty or parcel.crs is None:
-                raise ValueError('Parcel must contain geometry and a defined CRS.')
-            parcel = parcel[parcel.geometry.notna() & ~parcel.geometry.is_empty].copy()
-            if parcel.empty: raise ValueError('Parcel has no valid geometries.')
-            parcel['geometry'] = parcel.geometry.map(make_valid)
-            parcel = parcel[parcel.geom_type.isin(['Polygon', 'MultiPolygon'])]
-            if parcel.empty: raise ValueError('Parcel must contain polygon boundaries.')
-            boundary = unary_union(parcel.geometry)
-            key = f'nationwide/{island}/{province}/safdz.gpkg'
-            cache = WORK_ROOT / 'eo79_r2' / island / (province + '.gpkg')
-            if not cache.exists(): r2_download(key, cache)
-            import pyogrio
-            info = pyogrio.read_info(cache)
-            source_crs = info.get('crs')
-            if not source_crs: raise ValueError('SAFDZ dataset has no CRS')
-            boundary_src = gpd.GeoSeries([boundary], crs=parcel.crs).to_crs(source_crs).iloc[0]
-            data = gpd.read_file(cache, bbox=tuple(boundary_src.bounds))
-            if data.empty: raise ValueError('No SAFDZ features intersect the parcel.')
-            data = data[data.geometry.notna() & ~data.geometry.is_empty].copy()
-            data['geometry'] = data.geometry.map(make_valid)
-            data = data[data.intersects(boundary_src)].copy()
-            data['geometry'] = data.geometry.intersection(boundary_src)
-            data = data.explode(index_parts=False, ignore_index=True)
-            data = data[data.geom_type.isin(['Polygon', 'MultiPolygon']) & ~data.geometry.is_empty].copy()
-            if data.empty: raise ValueError('No polygon SAFDZ overlap found within the parcel.')
-            data['AREA_HA'] = (data.to_crs('EPSG:6933').geometry.area / 10000).round(3)
-            data = data.loc[:, ~data.columns.duplicated()].copy()
-            # Shapefile DBF column names are limited to 10 characters.
-            names = {}
-            used = set()
-            for col in data.columns:
-                if col == 'geometry': continue
-                base = re.sub(r'[^A-Za-z0-9_]', '_', str(col))[:10] or 'FIELD'
-                name = base
-                counter = 1
-                while name.lower() in used:
-                    tail = str(counter)
-                    name = base[:10-len(tail)] + tail
-                    counter += 1
-                used.add(name.lower())
-                names[col] = name
-            data = data.rename(columns=names)
-            for col in data.columns:
-                if col != 'geometry' and str(data[col].dtype) in ('datetime64[ns]', 'datetime64[ns, UTC]'):
-                    data[col] = data[col].astype(str)
-            outdir = folder / 'output'
-            outdir.mkdir()
-            shp = outdir / 'EO79_SAFDZ_Clipped.shp'
-            data.to_file(shp, driver='ESRI Shapefile', encoding='UTF-8', index=False)
-            buffer = io.BytesIO()
-            with zipfile.ZipFile(buffer, 'w', zipfile.ZIP_DEFLATED) as z:
-                for item in outdir.iterdir():
-                    z.write(item, arcname=item.name)
-            buffer.seek(0)
-            return send_file(buffer, as_attachment=True,
-                             download_name=f'EO79_SAFDZ_Clipped_{province}.zip',
-                             mimetype='application/zip')
-        except (ValueError, zipfile.BadZipFile) as e:
-            return jsonify({'error': str(e)}), 400
-        except Exception as e:
-            app.logger.exception('EO79 shapefile clip failed')
-            return jsonify({'error': 'Clipping failed: ' + str(e)}), 500
-
-
-@app.route('/eo79')
-def eo79_module():
-    """Public EO79 map without a login gate."""
-    from flask import Response
-    from pathlib import Path
-    page = (Path(app.template_folder) / 'eo79_app.html').read_text(encoding='utf-8')
-    start = page.find('<div id="accessGate"')
-    if start != -1:
-        end = page.find('</script>', start)
-        if end != -1:
-            page = page[:start] + page[end + len('</script>'):]
-    # The agency panel is in a fixed 210px portrait grid row, previously clipped by overflow:hidden.
-    # Expand that row and allow its contents to remain visible.
-    page = page.replace('</head>', """<style id="eo79-portrait-agency-unclip">
-    #printLayout.portrait .rightcol {grid-template-rows:260px minmax(0,1fr)!important;overflow:visible!important}
-    #printLayout.portrait .agency {overflow:visible!important;height:auto!important;min-height:0!important}
-    #printLayout.portrait .agency .official-scale {overflow:visible!important}
-    #printLayout.portrait .agency .scale-bar-wrap {margin-bottom:6px!important}
-    </style>""" + '</head>', 1)
-    # Reserve space for the complete portrait scale bar and kilometer labels.
-    portrait_css = """<style id="eo79-portrait-scale-clearance">
-    #printLayout.portrait .agency .banner {margin-top:3px!important;margin-bottom:2px!important;padding-top:4px!important;padding-bottom:4px!important;line-height:1!important}
-    #printLayout.portrait .agency .subtitle {min-height:0!important;line-height:1!important;font-size:7.5px!important}
-    #printLayout.portrait .agency .official-north {height:29px!important;width:40px!important;margin:0 auto!important}
-    #printLayout.portrait .agency .official-north img {height:28px!important;width:30px!important;object-fit:contain!important}
-    #printLayout.portrait .agency .official-scale {margin-top:0!important;line-height:1!important}
-    #printLayout.portrait #numericScale {margin-bottom:1px!important}
-    #printLayout.portrait .scale-bar-wrap {margin-bottom:0!important}
-    #printLayout.portrait .scale-bar {height:7px!important}
-    #printLayout.portrait .scale-bar span {margin-top:3px!important}
-    #printLayout.portrait #scaleUnits {font-size:6.5px!important;margin-top:0!important}
-    </style>"""
-    page = page.replace('</head>', portrait_css + '</head>', 1)
-    # Keep the legend's hectare values at two decimal places so they fit their cells.
-    legend_start = page.find('function renderLegend(')
-    legend_end = page.find('function updateCoords()', legend_start)
-    if legend_start >= 0 and legend_end > legend_start:
-        legend_script = page[legend_start:legend_end].replace('.toFixed(4)', '.toFixed(2)')
-        page = page[:legend_start] + legend_script + page[legend_end:]
-    page = page.replace('</head>', '<style id="eo79-legend-number-fit">#legendBody td.ha,#legendBody td.pct{white-space:nowrap;text-align:right;font-variant-numeric:tabular-nums;padding-left:2px!important;padding-right:3px!important;box-sizing:border-box}</style></head>', 1)
-    # Label only polygons with enough on-screen room for legible SAFDZ class text.
-    # Re-evaluate on zoom to avoid label collisions on small map polygons.
-    page = page.replace(
-        "l.bindTooltip(c,{permanent:true,direction:'center',className:'safdz-label'})",
-        "if((()=>{const b=l.getBounds();const a=map.project(b.getNorthWest());"
-        "const z=map.project(b.getSouthEast());const w=Math.abs(z.x-a.x),"
-        "h=Math.abs(z.y-a.y);return w>=38&&h>=26&&w*h>=1600})())"
-        "l.bindTooltip(c,{permanent:true,direction:'center',className:'safdz-label'})",
-        1)
-    page = page.replace(
-        "function clipSafdz(){",
-        "map.on('zoomend',()=>{if(clippedFC)redraw()});"
-        "function clipSafdz(){",
-        1)
-    # Expose only the live map's already-clipped SAFDZ data and its native rasterizer.
-    page = page.replace(
-        "let parcelFC=null,safdzFC=null,clippedFC=null,parcelLayer=null,safdzLayer=null;",
-        "let parcelFC=null,safdzFC=null,clippedFC=null,parcelLayer=null,safdzLayer=null;"
-        "window.__eo79ExportState=()=>({clippedFC,parcelFC,rasterize});",
-        1)
-    # Keep only Fit Parcel in the original Step 5 action row; export via checklist.
-    page = page.replace(
-        '<button class="secondary" id="recomputeBtn">Recompute Areas</button>', '<button id="recomputeBtn" hidden aria-hidden="true" tabindex="-1"></button>', 1)
-    page = page.replace('<button id="jpgBtn">Export JPEG</button>', '<button id="jpgBtn" hidden aria-hidden="true" tabindex="-1"></button>', 1)
-    page = page.replace('<button id="pdfBtn">Export PDF</button>', '<button id="pdfBtn" hidden aria-hidden="true" tabindex="-1"></button>', 1)
-    # Optional EO79 export checklist; preserves the original map UI.
-    page = page.replace('<div class="status warn" id="exportStatus">', """<section id="eo79-export-panel" style="position:static;width:100%;box-sizing:border-box;margin:12px 0;padding:12px;border:1px solid #c8ded0;border-radius:10px;background:#f4faf6;color:#183a2b;font:13px Arial">
-    <strong>Generate &amp; Download</strong><div style="margin:10px 0">
-    <label><input type="checkbox" class="eo79-format" value="jpeg" checked> JPEG map</label><br>
-    <label><input type="checkbox" class="eo79-format" value="pdf" checked> PDF map</label><br>
-    <label><input type="checkbox" class="eo79-format" value="shapefile" checked> Clipped SAFDZ Shapefile</label></div>
-    <button id="eo79-generate" type="button">Generate selected outputs</button>
-    <p id="eo79-export-status" style="max-width:300px;overflow-wrap:anywhere"></p></section>
-    <style>#eo79-export-panel select,#eo79-export-panel input[type=file]{display:block;width:100%;margin:7px 0;padding:5px}#eo79-generate{background:#17643f;color:white;border:0;border-radius:6px;padding:10px;cursor:pointer}@media print{#eo79-export-panel{display:none!important}}</style>
-    """ + '<div class="status warn" id="exportStatus">', 1)
-    page = page.replace('</body>', '<script src="/static/eo79_export.js?v=responsive-3"></script></body>', 1)
-    page = page.replace('</head>', '<link rel="stylesheet" href="/static/eo79_layout.css?v=responsive-3"></head>', 1)
-    page = page.replace('</body>', '<script src="/static/eo79_layout.js?v=responsive-3"></script></body>', 1)
-    return Response(page, mimetype='text/html')
-
-
-@app.get('/api/gis-status')
-@login_required
-def gis_operation_status():
-    return jsonify({'busy':runtime_limits.GIS_LOCK.locked()})
-
-
-@app.route('/health')
+@app.get('/health')
 def health():
-    return jsonify({'status': 'ok', 'app': 'NPAAAD/SAFDZ CLUP Harmonizer', 'version': '2.7'})
+    return {'status': 'ok', 'app': 'PCLAM'}
 
 
-def r2_client():
-    account=os.environ.get('R2_ACCOUNT_ID')
-    access=os.environ.get('R2_ACCESS_KEY_ID')
-    secret=os.environ.get('R2_SECRET_ACCESS_KEY')
-    if not all((account,access,secret)):
-        raise ValueError('R2 credentials missing from this Render service')
-    return boto3.client('s3',endpoint_url='https://'+account+'.r2.cloudflarestorage.com',aws_access_key_id=access,aws_secret_access_key=secret,region_name='auto',config=Config(signature_version='s3v4'))
-
-def r2_selection():
-    import re
-    island=request.form.get('r2_island','').lower().strip()
-    province=request.form.get('r2_province','').lower().strip()
-    if not island and not province: return None
-    if island not in ('luzon','visayas','mindanao') or not re.fullmatch(r'[a-z0-9-]{2,60}',province):
-        raise ValueError('Invalid province selection')
-    return {layer:'nationwide/'+island+'/'+province+'/'+layer+'.gpkg' for layer in ('npaaad','safdz')}
-
-def r2_download(key,dest):
-    dest.parent.mkdir(parents=True,exist_ok=True)
-    client=r2_client()
-    bucket=os.environ.get('R2_BUCKET','npaaad-safdz-data')
-    obj=client.head_object(Bucket=bucket,Key=key)
-    if obj['ContentLength']>500*1024*1024: raise ValueError('Selected GeoPackage exceeds 500 MB')
-    from boto3.s3.transfer import TransferConfig
-    runtime_limits.ensure_space(int(obj['ContentLength']))
-    client.download_file(bucket,key,str(dest),Config=TransferConfig(max_concurrency=1,use_threads=False))
-    return dest
-
-def r2_dataset_rows():
-    rows=[]
-    client=r2_client()
-    for page in client.get_paginator('list_objects_v2').paginate(Bucket=os.environ.get('R2_BUCKET','npaaad-safdz-data'),Prefix='nationwide/'):
-        for item in page.get('Contents',[]):
-            parts=item['Key'].split('/')
-            if len(parts)==4 and parts[1] in ('luzon','visayas','mindanao') and parts[3] in ('npaaad.gpkg','safdz.gpkg','landcover.gpkg') and item['Size']>0:
-                rows.append({'island':parts[1],'province':parts[2],'layer':parts[3][:-5],'bytes':item['Size'],'etag':item.get('ETag','')})
-    return rows
-
-@app.route('/api/r2/datasets')
-def list_r2_datasets():
+@app.get('/api/catalog')
+def catalog():
     try:
-        rows=[{key:value for key,value in row.items() if key!='etag'}
-              for row in r2_dataset_rows() if row['layer']!='landcover']
-        return jsonify({'datasets':rows})
-    except Exception as e:
-        return jsonify({'error':'Unable to list R2 datasets: '+str(e)}),502
-
-def reference_metadata(path, role):
-    import pyogrio
-    info=pyogrio.read_info(path)
-    frame=gpd.read_file(path,rows=1000)
-    fields=[name for name in frame.columns if name!='geometry']
-    suggested=suggest_field(fields,role)
-    return {'filename':path.name,'crs':str(frame.crs),'epsg':frame.crs.to_epsg() if frame.crs else None,
-            'geometry_types':list(frame.geom_type.dropna().astype(str).unique()),
-            'feature_count':int(info.get('features') or len(frame)),'fields':fields,
-            'suggested_field':suggested,'sample_values':field_preview(frame,suggested)}
+        with catalog_lock:
+            rows = sources.catalog
+    except DataError as exc:
+        raise HTTPException(503, str(exc)) from exc
+    except Exception as exc:
+        logger.exception('Catalog read failed')
+        raise HTTPException(503, 'The shared GIS catalog is temporarily unavailable.') from exc
+    return {'provinces': [
+        dict(id=row['id'], name=row['name'], region=row['region'],
+             land_available=bool(row['land']), coverage=sorted(row['zones']))
+        for row in sorted(rows.values(), key=lambda r: (r['region'], r['name']))
+    ], 'crops': CROPS}
 
 
-@app.route('/inspect', methods=['POST'])
-@login_required
-@runtime_limits.inspect_guard
-def inspect_layers():
-    job=WORK_ROOT/('inspect_'+uuid.uuid4().hex)
-    job.mkdir(parents=True,exist_ok=True)
-    result={}
-    automatic=request.form.get('reference_mode')=='auto'
+def run(job, request, row):
+    def check():
+        if job['cancel'].is_set():
+            raise Cancelled()
+
+    def progress(value, stage):
+        check()
+        job['state'].update(progress=value, stage=stage)
+
     try:
-        chosen=None if automatic else r2_selection()
-        elu=None
-        for role in ('elu','clup','npaaad','safdz','landcover','poultry'):
-            if automatic and role in ('npaaad','safdz'): continue
-            upload=request.files.get(role+'_zip')
-            if not upload or not upload.filename: continue
-            if role=='elu':
-                import elu_analysis,elu_cleanup
-                shp=extract_shapefile_zip(upload,job/role)
-                elu,meta,report,_=elu_analysis.prepare_file(shp,job/role/'upload.zip',upload.filename,request.form.get('elu_cleanup_field'),elu_cleanup.options(request.form),suggest_field)
-                result[role]=meta
-                result['_elu_cleanup']=report
-                continue
-            frame,meta=inspect_uploaded_shapefile(upload,job/role,role)
-            suggested=suggest_field(meta['fields'],role)
-            meta['suggested_field']=suggested
-            meta['sample_values']=field_preview(frame,suggested)
-            result[role]=meta
-        if result.get('_elu_cleanup',{}).get('requires_review'):
-            result['_crs_summary']={'master_ok':False,'master_crs':None,'error':'Resolve ELU overlaps or missing classes before reference detection.'}
-            return jsonify(result)
-        from workspace_ux import suggest_municipality
-        if elu is not None: result['_municipality']=suggest_municipality(elu)
-        paths={}
-        if automatic:
-            import auto_reference
-            if elu is None: raise ValueError('Upload an Existing / Actual Land Use (ELU) shapefile ZIP.')
-            token=request.form.get('auto_reference_token','')
-            include_landcover = 'landcover' not in result
-            try:
-                if not token: raise ValueError('No previous reference detection.')
-                folder,auto_meta=auto_reference.load(token,elu)
-                if auto_meta.get('include_landcover') != include_landcover:
-                    raise ValueError('Land Cover upload changed.')
-            except ValueError:
-                folder,auto_meta=auto_reference.prepare(elu,r2_dataset_rows(),r2_download,suggest_field,
-                                                        normalize_polygon_gdf,include_landcover=include_landcover)
-            paths={role:folder/(role+'.gpkg') for role in ('npaaad','safdz')}
-            if include_landcover and auto_meta.get('land_cover_available'):
-                paths['landcover'] = folder/'landcover.gpkg'
-            result['_auto_reference']=auto_meta
-        elif chosen:
-            paths={role:r2_download(key,job/(role+'.gpkg')) for role,key in chosen.items()}
-        else:
-            for role in ('npaaad','safdz'):
-                files=list((job/role).rglob('*.shp'))
-                if files: paths[role]=files[0]
-        for role,path in paths.items():
-            result[role]=reference_metadata(path,role)
-        master_ok=False
-        master_crs=None
-        error=None
-        if all(role in paths for role in ('npaaad','safdz')):
-            np_crs=gpd.read_file(paths['npaaad'],rows=1).crs
-            saf_crs=gpd.read_file(paths['safdz'],rows=1).crs
-            if np_crs is None or saf_crs is None:
-                error='NPAAAD or SAFDZ has a missing/unreadable CRS.'
-            elif np_crs.equals(saf_crs):
-                master_ok=True
-                auth=np_crs.to_authority()
-                master_crs=':'.join(map(str,auth)) if auth else np_crs.to_string()
-            else:
-                error='NPAAAD and SAFDZ use different CRS. They must match before processing.'
-        result['_crs_summary']={'master_ok':master_ok,'master_crs':master_crs,'error':error}
-        return jsonify(result)
-    except Exception as error:
-        return jsonify({'error':str(error)}),400
+        progress(1, 'Starting assessment')
+        job['state']['status'] = 'running'
+        result = assessments(sources, row, request.mode, set(request.crops), job['folder'], progress, check)
+        check()
+        check_status = {'progress': 100, 'stage': 'Assessment ready', 'status': 'complete', 'result': result}
+        job['state'].update(check_status)
+    except Cancelled:
+        shutil.rmtree(job['folder'], ignore_errors=True)
+        job['state'].update(status='cancelled', stage='Cancelled')
+    except Exception as exc:
+        logger.exception('Assessment failed for %s', row['id'])
+        shutil.rmtree(job['folder'], ignore_errors=True)
+        job['state'].update(status='failed', stage=str(exc) if isinstance(exc, DataError) else 'GIS processing failed. Check the source dataset or retry.')
     finally:
-        shutil.rmtree(job,ignore_errors=True)
+        job['finished'] = time.monotonic()
 
 
-@app.route('/elu-review/<token>')
-@login_required
-def elu_review_download(token):
-    import elu_cleanup
-    try:
-        return send_file(elu_cleanup.review_path(token),as_attachment=True,download_name='ELU_GEOMETRY_REVIEW.zip')
-    except ValueError as error:
-        return jsonify({'error':str(error)}),404
+@app.post('/api/jobs', status_code=202)
+def start(request: Request):
+    if not set(request.crops).issubset(CROPS):
+        raise HTTPException(422, 'Unknown crop classification.')
+    catalog()
+    row = sources.catalog.get(request.province)
+    if not row:
+        raise HTTPException(404, 'Province not found.')
+    required = {'npaaad', 'safdz'} if request.mode == 'combined' else {request.mode}
+    if not row['land'] or not required.issubset(row['zones']):
+        raise HTTPException(422, 'Required GIS layers are missing for this selection.')
+    with job_lock:
+        now = time.monotonic()
+        for key, old in list(jobs.items()):
+            if old.get('finished') and now - old['finished'] > 3600:
+                shutil.rmtree(old['folder'], ignore_errors=True)
+                del jobs[key]
+        if sum(not item.get('finished') for item in jobs.values()) >= 3:
+            raise HTTPException(429, 'The assessment queue is full. Try again after a job completes.')
+        if len(jobs) >= 12:
+            raise HTTPException(429, 'Temporary results storage is full. Try again later.')
+        job_id = uuid.uuid4().hex
+        job = {'folder': Path(tempfile.mkdtemp(prefix='pclam-result-')), 'cancel': Event(),
+               'created': now, 'state': {'status': 'queued', 'progress': 0, 'stage': 'Queued'}}
+        jobs[job_id] = job
+        executor.submit(run, job, request, row)
+    return {'id': job_id}
 
 
-JOBS = {}
-JOBS_LOCK = threading.Lock()
-
-def set_job(job_id, **kwargs):
-    with JOBS_LOCK:
-        JOBS.setdefault(job_id, {}).update(kwargs)
-        folder=WORK_ROOT/job_id
-        if folder.is_dir():
-            target=folder/'job_status.json'
-            temporary=folder/'job_status.json.tmp'
-            temporary.write_text(json.dumps(JOBS[job_id]))
-            temporary.replace(target)
-
-def extract_zip_path(zpath: Path, dest: Path):
-    dest.mkdir(parents=True, exist_ok=True)
-    with zipfile.ZipFile(zpath, 'r') as z:
-        runtime_limits.extract_checked(z,dest)
-    shp_files = list(dest.rglob('*.shp'))
-    if not shp_files:
-        raise ValueError(f'No .shp file found in {zpath.name}')
-    return shp_files[0]
-
-def validate_elu_mapping(mapping, values=None):
-    if not isinstance(mapping, dict) or not mapping:
-        raise ValueError('Review every ELU description and confirm its category before processing.')
-    cleaned = {}
-    for key, value in mapping.items():
-        category = str(value).strip().upper()
-        if category not in {'AGR', 'BU', 'OTHER'}:
-            raise ValueError('Every ELU description needs AGR, BU, or Other / Ignore. Review the field mapping.')
-        cleaned[str(key).strip()] = category
-    if values is not None:
-        expected = {str(value).strip() for value in values if not pd.isna(value) and str(value).strip()}
-        missing = expected - set(cleaned)
-        if missing:
-            raise ValueError(f'{len(missing)} ELU descriptions have no reviewed category. Inspect the current files and select the correct classification field; fields with more than 1,000 unique descriptions need a categorical field.')
-    return cleaned
+def get_job(job_id):
+    with job_lock:
+        job = jobs.get(job_id)
+    if not job:
+        raise HTTPException(404, 'This assessment has expired or was restarted.')
+    return job
 
 
-def run_background(job_id, job, uploads, fields, elu_mapping):
-    started=time.time()
-    def progress(pct, step):
-        set_job(job_id, status='processing', percent=pct, step=step, elapsed=int(time.time()-started))
-    try:
-        progress(5, 'Reading uploaded shapefiles')
-        shp_elu=extract_zip_path(uploads['elu_zip'], job/'elu')
-        shp_np=extract_zip_path(uploads['npaaad_zip'], job/'npaaad') if 'npaaad_zip' in uploads else uploads['npaaad_gpkg']
-        shp_saf=extract_zip_path(uploads['safdz_zip'], job/'safdz') if 'safdz_zip' in uploads else uploads['safdz_gpkg']
-        elu_original=gpd.read_file(shp_elu,columns=[fields['elu']])
-        elu_raw=gpd.read_file(uploads['_elu_cleaned_path'],layer='elu_cleaned') if '_elu_cleaned_path' in uploads else elu_original
-        np_raw=gpd.read_file(shp_np,columns=[fields['npaaad']]); saf_raw=gpd.read_file(shp_saf,columns=[fields['safdz']])
-        if np_raw.crs is None or saf_raw.crs is None: raise ValueError('NPAAAD or SAFDZ has a missing/unreadable CRS (.prj).')
-        if not np_raw.crs.equals(saf_raw.crs): raise ValueError('NPAAAD and SAFDZ have different CRS. Processing stopped to protect spatial alignment.')
-        target_crs=np_raw.crs
-        # v1.8: the former full overlap/duplicate QA scan was the main reason the
-        # UI appeared stuck at 5%. Use a fast validity/count QA during the run.
-        qa={'ELU_before':fast_qa(elu_original),'NPAAAD_before':fast_qa(np_raw),'SAFDZ_before':fast_qa(saf_raw)}
-        if '_elu_cleanup_report' in uploads:
-            qa['ELU_cleanup']=uploads['_elu_cleanup_report']
-        if '_auto_reference' in uploads:
-            qa['Reference_detection']={key:value for key,value in uploads['_auto_reference'].items() if key not in ('token','boundary_hash')}
-        progress(15, 'Preparing layers')
-        # v1.9: copy user-selected fields into unique internal names BEFORE any
-        # overlay. GeoPandas otherwise suffixes same-named fields (_1/_2), which
-        # caused the v1.8 KeyError: 'SAFDZ' during summary generation.
-        internal={'elu':'ELU_CLS','clup':'CLUP_CLS','npaaad':'NP_CLS','safdz':'SZ_CLS','landcover':'LC_CLS'}
-        poultry_clip=None; poultry_by_elu={}
-        for label, gdf, key in [('ELU',elu_raw,'elu'),('NPAAAD',np_raw,'npaaad'),('SAFDZ',saf_raw,'safdz')]:
-            if fields[key] not in gdf.columns:
-                raise ValueError(f"{label} classification field '{fields[key]}' was not found. Please select a valid field before processing.")
-        elu_mapping=validate_elu_mapping(elu_mapping, elu_raw[fields['elu']])
-        elu_p=fast_prepare(elu_raw,fields['elu'],target_crs).rename(columns={fields['elu']:internal['elu']})
-        np_p=fast_prepare(np_raw,fields['npaaad'],target_crs).rename(columns={fields['npaaad']:internal['npaaad']})
-        saf_p=fast_prepare(saf_raw,fields['safdz'],target_crs).rename(columns={fields['safdz']:internal['safdz']})
-        for label, original, repaired in [('ELU',elu_raw,elu_p),('NPAAAD',np_raw,np_p),('SAFDZ',saf_raw,saf_p)]:
-            before=int((~original.geometry.is_valid).sum())
-            after=int((~repaired.geometry.is_valid).sum())
-            qa[label+'_post_repair']={'invalid_before':before,'invalid_after_repair':after,'features_before':len(original),'features_after_repair':len(repaired),'repair_status':'PASS' if after==0 else 'FAIL'}
-            if after: raise ValueError(f'{label}: {after} invalid geometries remain after repair.')
-        progress(27, 'Preparing ELU boundary')
-        elu=dissolve_by_field(elu_p,internal['elu'])
-        try: boundary_geom=elu.geometry.union_all()
-        except Exception: boundary_geom=elu.geometry.unary_union
-        elu_boundary=gpd.GeoDataFrame(geometry=[boundary_geom],crs=elu.crs)
-        # v2.4 speed optimization: spatially clip first, dissolve second. This
-        # avoids dissolving thousands of polygons that are outside the ELU.
-        progress(36, 'Filtering NPAAAD and SAFDZ to ELU')
-        np_local=normalize_polygon_gdf(gpd.clip(np_p,elu_boundary,keep_geom_type=True))
-        saf_local=normalize_polygon_gdf(gpd.clip(saf_p,elu_boundary,keep_geom_type=True))
-        # Fail closed: an ELU-only result is not a valid NPAAAD/SAFDZ harmonization.
-        # Zero overlap can mean a wrong province, missing CRS alignment, or
-        # incomplete R2 datasets; never silently export zeros as final results.
-        def _overlap_report(layer, data):
-            if data.empty:
-                return f'{layer}: 0 intersecting polygons'
-            codes=data[internal['npaaad'] if layer=='NPAAAD' else internal['safdz']].dropna().astype(str).str.strip()
-            return f'{layer}: {len(data)} polygons, codes '+', '.join(sorted(set(codes))[:12])
-        if np_local.empty or saf_local.empty:
-            raise ValueError('No spatial overlap with the ELU boundary. '+_overlap_report('NPAAAD',np_local)+'; '+_overlap_report('SAFDZ',saf_local)+'. Check province selection, layer CRS, and source dataset coverage. Excel export stopped to avoid misleading zero-area results.')
-        for layer,data,col in [('NPAAAD',np_local,internal['npaaad']),('SAFDZ',saf_local,internal['safdz'])]:
-            valid=data[col].dropna().astype(str).str.strip()
-            if valid.empty or not valid.ne('').any():
-                raise ValueError(f'{layer} overlaps ELU but the selected classification field has no values. Select the correct {layer} field in Layer Settings.')
-        np_clip=dissolve_by_field(np_local,internal['npaaad'])
-        saf_clip=dissolve_by_field(saf_local,internal['safdz'])
-        progress(48, 'Clipping NPAAAD and SAFDZ to ELU')
-        # v2.2 FAST OVERLAY ENGINE: avoid full polygon union. NPAAAD/SAFDZ are
-        # already clipped to ELU and dissolved by class, so split only polygons
-        # that actually intersect and append the untouched ELU remainder.
-        progress(48, 'Intersecting relevant NPAAAD polygons')
-        union1 = fast_split_overlay(elu, np_clip, internal['npaaad'])
-        if internal['elu'] not in union1.columns:
-            raise ValueError('ELU classification was lost during NPAAAD intersection.')
-
-        progress(62, 'Intersecting relevant SAFDZ polygons')
-        union2 = fast_split_overlay(union1, saf_clip, internal['safdz'])
-        for f in (internal['elu'], internal['npaaad'], internal['safdz']):
-            if f not in union2.columns:
-                raise ValueError(f'Classification field was lost after fast overlay: {f}')
-        if 'landcover_gpkg' in uploads or 'landcover_zip' in uploads:
-            progress(70, 'Processing Land Cover Map')
-            source = uploads.get('landcover_gpkg')
-            if source is None:
-                source = extract_zip_path(uploads['landcover_zip'],job/'landcover')
-            lc_raw = gpd.read_file(source,columns=[fields['landcover']])
-            qa['LandCover_before']=fast_qa(lc_raw)
-            if fields['landcover'] not in lc_raw.columns:
-                raise ValueError(f"Land Cover classification field '{fields['landcover']}' was not found. Please select a valid field before processing.")
-            lc_p=fast_prepare(lc_raw,fields['landcover'],target_crs).rename(columns={fields['landcover']:internal['landcover']})
-            # Clip before dissolve: only Land Cover polygons touching ELU are processed.
-            lc_local=normalize_polygon_gdf(gpd.clip(lc_p,elu_boundary,keep_geom_type=True))
-            lc_clip=dissolve_by_field(lc_local,internal['landcover'])
-            progress(72, 'Intersecting relevant Land Cover polygons')
-            union2 = fast_split_overlay(union2, lc_clip, internal['landcover'])
-            if internal['landcover'] not in union2.columns:
-                union2[internal['landcover']] = pd.NA
-        # Approved CLUP is optional. When supplied, split the harmonized layer by
-        # CLUP so the approved-CLUP decision matrix can be evaluated per polygon.
-        if 'clup_zip' in uploads:
-            progress(76, 'Intersecting Approved CLUP polygons')
-            shp_clup=extract_zip_path(uploads['clup_zip'],job/'clup'); clup_raw=gpd.read_file(shp_clup,columns=[fields['clup']])
-            qa['CLUP_before']=fast_qa(clup_raw)
-            if fields['clup'] not in clup_raw.columns:
-                raise ValueError(f"CLUP classification field '{fields['clup']}' was not found. Please select a valid field before processing.")
-            clup_p=fast_prepare(clup_raw,fields['clup'],target_crs).rename(columns={fields['clup']:internal['clup']})
-            clup_local=normalize_polygon_gdf(gpd.clip(clup_p,elu_boundary,keep_geom_type=True))
-            clup_clip=dissolve_by_field(clup_local,internal['clup'])
-            union2=fast_split_overlay(union2,clup_clip,internal['clup'])
-        if 'poultry_zip' in uploads:
-            progress(78, 'Clipping Poultry layer to ELU')
-            shp_poultry=extract_zip_path(uploads['poultry_zip'],job/'poultry'); poultry_raw=gpd.read_file(shp_poultry)
-            qa['Poultry_before']=fast_qa(poultry_raw)
-            if poultry_raw.crs is None: raise ValueError('Poultry layer has a missing/unreadable CRS (.prj).')
-            poultry_p=safe_reproject(poultry_raw[['geometry']].copy(),target_crs)
-            poultry_p=normalize_polygon_gdf(poultry_p)
-            poultry_clip=normalize_polygon_gdf(gpd.clip(poultry_p,elu_boundary,keep_geom_type=True))
-            if not poultry_clip.empty:
-                try: poultry_geom=poultry_clip.geometry.union_all()
-                except Exception: poultry_geom=poultry_clip.geometry.unary_union
-                # Poultry hectares per ELU without splitting the harmonized geometry.
-                for _,er in elu.iterrows():
-                    try: poultry_by_elu[str(er[internal['elu']])]=round(er.geometry.intersection(poultry_geom).area/10000.0,3)
-                    except Exception: poultry_by_elu[str(er[internal['elu']])]=0.0
-                union2['POULTRY_HA']=union2.geometry.apply(lambda g: round(g.intersection(poultry_geom).area/10000.0,3) if g is not None and not g.is_empty else 0.0)
-            else:
-                union2['POULTRY_HA']=0.0
-        progress(80, 'Computing area in hectares')
-        union2=normalize_polygon_gdf(union2)
-
-        def norm(v):
-            if pd.isna(v): return ''
-            return str(v).strip()
-        def broad_lu(v):
-            x=norm(v).upper().replace('_',' ').replace('-',' ').strip()
-            if x in {'BU','BUILT UP','BUILTUP'} or 'BUILT UP' in x: return 'BU'
-            if x in {'AGR','AGRICULTURE','AGRICULTURAL'} or x.startswith('AGR '): return 'AGR'
-            return x
-        def satellite(v):
-            x=norm(v).upper().replace('_',' ').replace('-',' ').strip()
-            if x in {'ANNUAL CROP','ANNUAL CROPS','PERENNIAL CROP','PERENNIAL CROPS'}: return 'AGR'
-            if x in {'BUILT UP','BUILTUP','BU'}: return 'BU'
-            return ''
-        def np_group(v):
-            x=norm(v).upper()
-            if x in NPAAAD_AGR: return 'AGR'
-            if x == 'BU': return 'BU'
-            return x
-        def sz_group(v):
-            x=norm(v).upper()
-            if x in SAFDZ_AGR: return 'AGR'
-            if x == 'BU': return 'BU'
-            return x
-        def ag_context(npv, szv):
-            # SAFDZ is the more specific agricultural zoning when codes 1-7 exist.
-            s=norm(szv).upper(); n=norm(npv).upper()
-            if s in SAFDZ_AGR: return ('AGR', s)
-            if n in NPAAAD_AGR: return ('AGR', n)
-            if s == 'BU' or n == 'BU': return ('BU', 'BU')
-            return ('', '')
-        def decide(row):
-            sat=satellite(row.get(internal['landcover'], ''))
-            zone, code=ag_context(row.get(internal['npaaad'],''), row.get(internal['safdz'],''))
-            if internal['clup'] in row.index and norm(row.get(internal['clup'],'')):
-                lu=broad_lu(row.get(internal['clup'],''))
-                if lu=='BU' and zone=='AGR' and sat=='BU': return 'BU'
-                if lu=='BU' and zone=='AGR' and sat=='AGR': return f'{code}/BU' if code else '?/BU'
-                if lu=='AGR' and zone=='BU' and sat=='BU': return 'AGR'
-            else:
-                raw_elu=norm(row.get(internal['elu'],''))
-                lu=elu_mapping.get(raw_elu, broad_lu(raw_elu))
-                if lu=='OTHER': return ''
-                if lu=='BU' and zone=='AGR' and sat=='BU': return 'BU'
-                if lu=='BU' and zone=='AGR' and sat=='AGR': return 'do not harmonize'
-                if lu=='AGR' and zone=='BU' and sat=='BU': return 'Ask LGU'
-            return ''
-
-        union2['Decision']=union2.apply(decide,axis=1)
-        from decision_fallback import fill_missing_decisions
-        fallback_count=fill_missing_decisions(union2,internal['elu'])
-        qa['Decision_fallback']={'features_filled_from_ELU_CLS':fallback_count,'existing_rule_decisions_preserved':True}
-        union2['AREA_HA']=(union2.geometry.area/10000.0).round(3)
-        u=union2.copy()
-        required=[internal['elu'],internal['npaaad'],internal['safdz']]
-        missing=[f for f in required if f not in u.columns]
-        if missing:
-            raise ValueError('Required classification fields were lost during overlay: ' + ', '.join(missing))
-        for f in required:
-            u[f]=u[f].where(u[f].notna(), '').astype(str).str.strip()
-        # Detect classification loss after overlay, even when source polygons overlap.
-        for layer,col in [('NPAAAD',internal['npaaad']),('SAFDZ',internal['safdz'])]:
-            classified=u[col].astype(str).str.strip()
-            classified=classified[~classified.str.lower().isin(['','nan','none','<na>'])]
-            if classified.empty or float(u.loc[classified.index,'AREA_HA'].sum())<=0:
-                raise ValueError(f'{layer} classes were lost during polygon overlay or have zero area. Verify the classification field and inspect source geometry/CRS. Export stopped.')
-        saf_matrix=pd.pivot_table(u,values='AREA_HA',index=internal['elu'],columns=internal['safdz'],aggfunc='sum',fill_value=0)
-        np_matrix=pd.pivot_table(u,values='AREA_HA',index=internal['elu'],columns=internal['npaaad'],aggfunc='sum',fill_value=0)
-        saf_cols=[c for c in SAFDZ_ORDER if c in saf_matrix.columns]+[c for c in saf_matrix.columns if c not in SAFDZ_ORDER]
-        np_cols=[c for c in NPAAAD_ORDER if c in np_matrix.columns]+[c for c in np_matrix.columns if c not in NPAAAD_ORDER]
-        saf_matrix=saf_matrix.reindex(columns=saf_cols); np_matrix=np_matrix.reindex(columns=np_cols)
-        qa['Final']={'crs':str(union2.crs),'features':len(union2),'total_area_ha':round(float(union2['AREA_HA'].sum()),3),'geometry_types':', '.join(sorted(union2.geom_type.unique()))}
-        final_invalid=int((~union2.geometry.is_valid).sum())
-        qa['Final']['invalid_after_overlay']=final_invalid
-        qa['Final']['geometry_validation']='PASS' if final_invalid==0 else 'FAIL'
-        if final_invalid: raise ValueError(f'Final layer contains {final_invalid} invalid geometries. Export stopped.')
-        # Source uploads and overlay intermediates are no longer needed. Release
-        # them before making the several export copies of the final layer.
-        del elu_original,elu_raw,np_raw,saf_raw,elu_p,np_p,saf_p,elu,np_local,saf_local,np_clip,saf_clip,union1,elu_boundary,u
-        if 'lc_raw' in locals():del lc_raw,lc_p,lc_local,lc_clip
-        if 'clup_raw' in locals():del clup_raw,clup_p,clup_local,clup_clip
-        if 'poultry_raw' in locals():del poultry_raw,poultry_p
-        for name in ('uploads','elu','elu_validate','npaaad','safdz','landcover','clup','poultry'):
-            shutil.rmtree(job/name,ignore_errors=True)
-        runtime_limits.release_memory()
-        progress(90, 'Generating Excel, Shapefile and QA/QC report')
-        out_dir=job/'outputs'; out_dir.mkdir(); shp_dir=out_dir/'union_shapefile'; shp_dir.mkdir()
-        from land_use_styles import apply_palette, write_styles
-        styled_union,style_report=apply_palette(union2,internal['elu'])
-        qa['Land_use_style']=style_report
-        shp_path=shp_dir/'HARMONIZED_UNION.shp'; styled_union.to_file(shp_path,encoding='UTF-8',index=False)
-        write_styles(shp_path,style_report['palette'])
-        runtime_limits.ensure_space(sum(path.stat().st_size for path in shp_dir.iterdir() if path.is_file())+1024*1024)
-        shp_zip=out_dir/'HARMONIZED_UNION.zip'
-        with zipfile.ZipFile(shp_zip,'w',zipfile.ZIP_DEFLATED) as z:
-            for q in shp_dir.iterdir(): z.write(q,q.name)
-        xlsx=out_dir/'HARMONIZATION_SUMMARY.xlsx'; write_excel({'safdz':saf_matrix,'npaaad':np_matrix},union2,qa,xlsx,poultry_by_elu)
-        runtime_limits.ensure_space(sum(path.stat().st_size for path in out_dir.rglob('*') if path.is_file())+10*1024*1024)
-        bundle=out_dir/'HARMONIZATION_RESULTS.zip'
-        with zipfile.ZipFile(bundle,'w',zipfile.ZIP_DEFLATED) as z:
-            if '_elu_cleaned_path' in uploads:
-                z.write(uploads['_elu_cleaned_path'],'ELU_GEOMETRY_REVIEW.gpkg')
-                z.writestr('ELU_CLEANUP_REPORT.json',json.dumps(uploads['_elu_cleanup_report'],indent=2))
-            z.write(xlsx,xlsx.name); z.write(shp_zip,shp_zip.name)
-            if poultry_clip is not None:
-                pdir=out_dir/'poultry_clipped'; pdir.mkdir(exist_ok=True); pshp=pdir/'POULTRY_CLIPPED.shp'; poultry_clip.to_file(pshp)
-                pzip=out_dir/'POULTRY_CLIPPED.zip'
-                with zipfile.ZipFile(pzip,'w',zipfile.ZIP_DEFLATED) as pz:
-                    for q in pdir.iterdir(): pz.write(q,q.name)
-                z.write(pzip,pzip.name)
-            qa_json=out_dir/'QA_QC.json'; qa_json.write_text(json.dumps(qa,indent=2),encoding='utf-8'); z.write(qa_json,qa_json.name)
-        summary=dict(JOBS.get(job_id,{}).get('result_summary',{}))
-        summary.update({'features':qa['Final']['features'],'area_ha':qa['Final']['total_area_ha'],'gray_features':style_report['missing_class_features'],'additional_color_features':style_report['additional_features'],'fallback_decisions':fallback_count})
-        set_job(job_id,status='complete',percent=100,step='Processing Complete',elapsed=int(time.time()-started),bundle=str(bundle),result_summary=summary)
-    except Exception as e:
-        set_job(job_id,status='error',percent=JOBS.get(job_id,{}).get('percent',0),step='Processing Failed',elapsed=int(time.time()-started),error=str(e),details=traceback.format_exc())
-
-def run_background_guarded(job_id,job,uploads,fields,mapping):
-    try:
-        run_background(job_id,job,uploads,fields,mapping)
-    finally:
-        try:
-            state=JOBS.get(job_id,{})
-            runtime_limits.trim_job(job,state.get('bundle') if state.get('status')=='complete' else None)
-        finally:
-            runtime_limits.release_memory();runtime_limits.GIS_LOCK.release()
+@app.get('/api/jobs/{job_id}')
+def status(job_id: str):
+    job = get_job(job_id)
+    return {**job['state'], 'elapsed': int((job.get('finished') or time.monotonic()) - job['created'])}
 
 
-def stored_job(job_id):
-    import re
-    if not re.fullmatch('[a-f0-9]{32}',job_id):return {}
-    with JOBS_LOCK:
-        data=dict(JOBS.get(job_id,{}))
-    if not data:
-        try:
-            candidate=json.loads((WORK_ROOT/job_id/'job_status.json').read_text())
-            if candidate.get('status')=='error' or (candidate.get('status')=='complete' and Path(candidate.get('bundle','')).is_file()):data=candidate
-        except (OSError,ValueError):pass
-    if data.get('status')=='complete' and not Path(data.get('bundle','')).is_file():
-        return {'status':'error','percent':100,'elapsed':data.get('elapsed',0),'error':'These temporary results have expired. Generate the results again.','expired':True}
-    return data
+@app.delete('/api/jobs/{job_id}', status_code=202)
+def cancel(job_id: str):
+    get_job(job_id)['cancel'].set()
+    return {'requested': True}
 
 
-@app.route('/process_start', methods=['POST'])
-@login_required
-def process_start():
-    job=None
-    handed_off=False
-    if not runtime_limits.GIS_LOCK.acquire(blocking=False):
-        return jsonify({'error':'Another ELU reference detection or GIS generation is running. Please wait.','busy':True}),409
-    try:
-        runtime_limits.cleanup();runtime_limits.ensure_space()
-        has_landcover=bool(request.files.get('landcover_zip') and request.files['landcover_zip'].filename)
-        if has_landcover and request.form.get('elu_reviewed')!='yes':
-            raise ValueError('Confirm that you reviewed all ELU categories, including Other / Ignore.')
-        try:
-            elu_mapping=validate_elu_mapping(json.loads(request.form.get('elu_mapping','{}') or '{}')) if has_landcover else {}
-        except (json.JSONDecodeError,TypeError):
-            raise ValueError('Invalid ELU mapping. Inspect the files again and review all categories.')
-        automatic=request.form.get('reference_mode')=='auto'
-        chosen=None if automatic else r2_selection()
-        for role in (['elu_zip'] if automatic or chosen else ['elu_zip','npaaad_zip','safdz_zip']):
-            if role not in request.files or not request.files[role].filename:
-                raise ValueError('Missing required upload: '+role)
-        job_id=uuid.uuid4().hex
-        job=WORK_ROOT/job_id
-        up=job/'uploads'
-        up.mkdir(parents=True)
-        uploads={}
-        for name in ['elu_zip','npaaad_zip','safdz_zip','landcover_zip','clup_zip','poultry_zip']:
-            if automatic and name in ('npaaad_zip','safdz_zip'): continue
-            upload=request.files.get(name)
-            if upload and upload.filename:
-                path=up/(name+'.zip')
-                upload.save(path)
-                uploads[name]=path
-        import elu_analysis,elu_cleanup
-        cleanup_field=request.form.get('elu_field','ELU').strip()
-        shp=extract_zip_path(uploads['elu_zip'],job/'elu_validate')
-        elu,cleanup_meta,cleanup_report,analysis_path=elu_analysis.prepare_file(shp,uploads['elu_zip'],'ELU.zip',cleanup_field,elu_cleanup.options(request.form),suggest_field)
-        if cleanup_meta['suggested_field']!=cleanup_field:raise ValueError('Choose a valid ELU classification field.')
-        if cleanup_report['requires_review']:
-            raise ValueError('Resolve ELU overlaps or missing classifications before generation. Review the geometry report.')
-        if cleanup_report['requires_change_confirmation'] and request.form.get('elu_cleanup_confirmed')!='yes':
-            raise ValueError('Confirm the gap filling and/or class-priority changes before generation.')
-        review_path=job/'ELU_GEOMETRY_REVIEW.gpkg'
-        shutil.copyfile(analysis_path,review_path)
-        uploads['_elu_cleaned_path']=review_path
-        uploads['_elu_cleanup_report']=cleanup_report
-        if automatic:
-            import auto_reference
-            folder,meta=auto_reference.load(request.form.get('auto_reference_token'),elu)
-            detected_landcover = not has_landcover and bool(meta.get('land_cover_available'))
-            if not has_landcover and meta.get('include_landcover') is False:
-                raise ValueError('Inspect the ELU again after removing the manual Land Cover upload.')
-            roles = ('npaaad', 'safdz', 'landcover') if detected_landcover else ('npaaad', 'safdz')
-            for role in roles:
-                path=up/(role+'.gpkg')
-                shutil.copyfile(folder/(role+'.gpkg'),path)
-                uploads[role+'_gpkg']=path
-            uploads['_auto_reference']=meta
-            if detected_landcover:
-                has_landcover=True
-                if request.form.get('elu_reviewed')!='yes':
-                    raise ValueError('Confirm that you reviewed all ELU categories, including Other / Ignore.')
-                elu_mapping=validate_elu_mapping(json.loads(request.form.get('elu_mapping','{}') or '{}'))
-        elif chosen:
-            for role,key in chosen.items(): uploads[role+'_gpkg']=r2_download(key,up/(role+'.gpkg'))
-        if not has_landcover:
-            from workspace_ux import default_mapping
-            elu_mapping=default_mapping(elu[cleanup_field])
-        fields={role:request.form.get(role+'_field',default).strip() for role,default in
-                [('elu','ELU'),('clup','CLUP'),('npaaad','NPAAAD'),('safdz','SAFDZ'),('landcover','LANDCOVER' if 'landcover_gpkg' in uploads else 'CLASS')]}
-        from workspace_ux import download_name
-        set_job(job_id,status='queued',percent=0,step='Preparing data',elapsed=0,download_name=download_name(request.form.get('output_municipality')),result_summary={'elu_features':len(elu),'land_cover_included':has_landcover,'reference_mode':'automatic' if automatic else 'manual'})
-        del elu
-        threading.Thread(target=run_background_guarded,args=(job_id,job,uploads,fields,elu_mapping),daemon=True).start()
-        handed_off=True
-        return jsonify({'job_id':job_id})
-    except Exception as error:
-        if job: shutil.rmtree(job,ignore_errors=True)
-        return jsonify({'error':str(error)}),400
-    finally:
-        if not handed_off:
-            runtime_limits.release_memory();runtime_limits.GIS_LOCK.release()
-
-@app.route('/progress/<job_id>')
-@login_required
-def job_progress(job_id):
-    data=stored_job(job_id)
-    if not data: return jsonify({'error':'Job not found'}),404
-    data.pop('bundle',None); return jsonify(data)
-
-@app.route('/download/<job_id>')
-@login_required
-def job_download(job_id):
-    data=stored_job(job_id)
-    if data.get('expired'):return jsonify({'error':data['error']}),410
-    if data.get('status')!='complete' or not data.get('bundle'): return jsonify({'error':'Results are not ready.'}),409
-    return send_file(data['bundle'],as_attachment=True,download_name=data.get('download_name','HARMONIZATION_RESULTS.zip'))
-
-if __name__ == '__main__':
-    port=int(os.environ.get('PORT','5055')); app.run(host='127.0.0.1',port=port,debug=False,use_reloader=False,threaded=True)
+@app.get('/api/jobs/{job_id}/files/{format}')
+def file(job_id: str, format: str):
+    job = get_job(job_id)
+    if job['state']['status'] != 'complete':
+        raise HTTPException(404, 'Assessment files are unavailable.')
+    if format in {'boundary.geojson', 'map.geojson'}:
+        return FileResponse(job['folder'] / format, media_type='application/geo+json')
+    path = job['folder'] / ('assessment.' + format)
+    if format not in EXPORTS or not path.is_file():
+        raise HTTPException(404, 'This file is unavailable for the assessment.')
+    result = job['state']['result']
+    province = result['province'].lower().replace(' ', '-')
+    return FileResponse(path, filename=f"pclam-{province}-{result['mode']}-{job_id[:8]}.{format}")
 
 
+app.mount('/', StaticFiles(directory=Path(__file__).with_name('web'), html=True), name='web')
