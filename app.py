@@ -27,6 +27,7 @@ catalog_lock = Lock()
 job_lock = Lock()
 jobs = {}
 executor = ThreadPoolExecutor(max_workers=1)
+NATIONWIDE_CROP_OPTIONS = 'nationwide-crop-options'
 logger = logging.getLogger('pclam')
 
 
@@ -192,8 +193,9 @@ def start(request: Request):
 
 @app.post('/api/crop-options', status_code=202)
 def crop_options(request: AreaRequest):
+    if request.region == 'Nationwide' and not (request.province or request.municipality or request.barangay):
+        return {'id': NATIONWIDE_CROP_OPTIONS}
     catalog()
-    nationwide = request.region == 'Nationwide'
     if request.province:
         row = selected_area(request.province, request.municipality, request.barangay)
         if request.region and request.region != row['region']:
@@ -202,15 +204,15 @@ def crop_options(request: AreaRequest):
     else:
         if not request.region or request.municipality or request.barangay:
             raise HTTPException(422, 'Select an assessment area first.')
-        rows = [item for item in sources.catalog.values() if nationwide or item['region'] == request.region]
+        rows = [item for item in sources.catalog.values() if item['region'] == request.region]
     rows = [row for row in rows if row['land']]
     if not rows:
         raise HTTPException(404, 'Land-use data is unavailable for this area.')
     key = tuple(getattr(request, field) for field in ('region', 'province', 'municipality', 'barangay'))
-    return submit_job(run_crop_options, rows, nationwide, key=key)
+    return submit_job(run_crop_options, rows, key=key)
 
 
-def run_crop_options(job, rows, nationwide):
+def run_crop_options(job, rows):
     def check():
         if job['cancel'].is_set():
             raise Cancelled()
@@ -221,7 +223,7 @@ def run_crop_options(job, rows, nationwide):
 
     try:
         job['state'].update(status='running')
-        result = landuse_crop_options(sources, rows, job['folder'], progress, check, nationwide=nationwide)
+        result = landuse_crop_options(sources, rows, job['folder'], progress, check)
         job['state'].update(status='complete', progress=100, stage='Land-use crops ready', result=result)
     except Cancelled:
         job['state'].update(status='cancelled', stage='Cancelled')
@@ -237,10 +239,10 @@ def run_crop_options(job, rows, nationwide):
 def submit_job(task, *args, key=None):
     with job_lock:
         now = time.monotonic()
-        for key, old in list(jobs.items()):
+        for expired_id, old in list(jobs.items()):
             if old.get('finished') and now - old['finished'] > 3600:
                 shutil.rmtree(old['folder'], ignore_errors=True)
-                del jobs[key]
+                del jobs[expired_id]
         if key is not None:
             for job_id, existing in jobs.items():
                 if existing.get('key') == key and existing['state']['status'] in ('queued', 'running', 'complete'):
@@ -273,6 +275,12 @@ def get_job(job_id):
 
 @app.get('/api/jobs/{job_id}')
 def status(job_id: str):
+    if job_id == NATIONWIDE_CROP_OPTIONS:
+        return {
+            'status': 'complete', 'progress': 100, 'elapsed': 0,
+            'stage': 'Supported nationwide crop categories ready',
+            'result': {'crops': [{'name': crop, 'labels': []} for crop in sorted(CROPS)]},
+        }
     job = get_job(job_id)
     return {**job['state'], 'elapsed': int((job.get('finished') or time.monotonic()) - job['created'])}
 

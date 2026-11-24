@@ -745,15 +745,14 @@ def regional_assessment(sources, rows, region, mode, selected, out, progress, ch
     return result
 
 
-def landuse_crop_options(sources, rows, out, progress, check, nationwide=False):
+def landuse_crop_options(sources, rows, out, progress, check):
     aliases = {canonical(key): value for key, value in json.loads(os.getenv('PCLAM_CROP_MAPPING', '{}')).items()}
     archives = {}
     for index, row in enumerate(rows):
         check()
         for meta in row['land']:
             entry = archives.setdefault(meta['Key'], (meta, []))
-            if not nationwide:
-                entry[1].append(index)
+            entry[1].append(index)
     if not archives:
         raise DataError('Land-use data is unavailable for this area.')
     boundaries = {}
@@ -768,29 +767,20 @@ def landuse_crop_options(sources, rows, out, progress, check, nationwide=False):
         check()
         progress(int(95 * index / len(archives)), f'Reading land-use archive {index + 1} of {len(archives)}')
         for path in sources.land_files(meta, out):
-            if nationwide:
-                layer, _, field = source_schema(path, 'landuse')
-                values = pyogrio.read_dataframe(path, layer=layer, columns=[field], read_geometry=False)[field]
-                labels = (str(value).strip() for value in values.dropna().unique())
-                for raw in labels:
-                    crop = crop_name(raw, aliases)
-                    if crop in CROPS:
-                        options[crop].add(raw)
-            else:
-                pending = frozenset(indices)
-                if pending not in boundaries:
-                    shapes = []
-                    for row_index in sorted(pending):
-                        row = rows[row_index]
-                        frame = sources.boundary(row) if row.get('municipality') else sources.province(row['id'])
-                        shapes.extend(frame.to_crs(CRS_AREA).geometry.map(geom_polygon))
-                    boundaries[pending] = gpd.GeoDataFrame(geometry=[sh.union_all(shapes)], crs=CRS_AREA)
-                boundary = boundaries[pending]
-                if boundary.geometry.iloc[0].is_empty:
-                    continue
-                for raw, _, _ in source_rows(path, 'landuse', boundary, qa, check, wanted=wanted):
-                    crop = crop_name(raw, aliases)
-                    if crop in CROPS:
-                        options[crop].add(raw)
-                        seen.add(raw)
+            pending = frozenset(indices)
+            if pending not in boundaries:
+                shapes = []
+                for row_index in sorted(pending):
+                    row = rows[row_index]
+                    frame = sources.boundary(row) if row.get('municipality') else sources.province(row['id'])
+                    shapes.extend(frame.to_crs(CRS_AREA).geometry.map(geom_polygon))
+                boundaries[pending] = gpd.GeoDataFrame(geometry=[sh.union_all(shapes)], crs=CRS_AREA)
+            boundary = boundaries[pending]
+            if boundary.geometry.iloc[0].is_empty:
+                continue
+            for raw, _, _ in source_rows(path, 'landuse', boundary, qa, check, wanted=wanted):
+                crop = crop_name(raw, aliases)
+                if crop in CROPS:
+                    options[crop].add(raw)
+                    seen.add(raw)
     return {'crops': [{'name': crop, 'labels': sorted(labels)} for crop, labels in sorted(options.items())]}
