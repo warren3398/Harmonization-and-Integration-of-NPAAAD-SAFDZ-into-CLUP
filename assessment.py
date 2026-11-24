@@ -18,7 +18,7 @@ CRS_AREA = 'EPSG:6933'
 NP = {'A', 'B', 'C', 'D', 'E', 'G'}
 SA = {str(i) for i in range(1, 8)}
 VALID = {'npaaad': NP | {'F', 'H', 'BU'}, 'safdz': SA | {'8', '9', '10', 'BU', 'WB'}}
-CROPS = ('Rice', 'Irrigated Rice', 'Rainfed Rice', 'Corn', 'Sweet Corn', 'Coconut', 'Mango', 'Banana',
+CROPS = ('Rice', 'Irrigated Rice', 'Rainfed Rice', 'Upland Rice', 'Corn', 'Sweet Corn', 'Coconut', 'Mango', 'Banana',
          'Coffee', 'Cacao', 'Onion', 'Garlic', 'Pineapple', 'Sugarcane', 'Abaca', 'Cassava',
          'Sweet Potato', 'Potato', 'Durian', 'Avocado', 'Rubber', 'Peanut', 'Mungbean', 'Soybean',
          'Sorghum', 'Vegetables', 'Strawberry', 'Citrus', 'Tobacco', 'Papaya', 'Oil Palm',
@@ -29,7 +29,9 @@ COLORS = {'Both': '#187354', 'NPAAAD only': '#4e65aa', 'SAFDZ only': '#a763b0',
 CROP_MAP = {canonical(name): name for name in CROPS}
 CROP_MAP.update({'mixedvegetables': 'Vegetables', 'diversifiedcrop': 'Diversified Crops', 'abacca': 'Abaca', 'maize': 'Corn', 'sugarcaneplantation': 'Sugarcane', 'coconutplantation': 'Coconut',
                  'palay': 'Rice', 'ricelandirrigated': 'Irrigated Rice', 'ricelandrainfed': 'Rainfed Rice'})
-NON_CROP = {'buildup', 'builtup', 'forest', 'grassland', 'shrubland', 'water', 'fishpond', 'mangrove'}
+RICE_TYPES = {'Irrigated Rice', 'Rainfed Rice', 'Upland Rice'}
+NON_CROP = {'buildup', 'builtup', 'forest', 'grassland', 'shrubland', 'shrubs', 'water', 'fishpond',
+            'mangrove', 'river', 'riverwash', 'reservoir', 'lake', 'pasture', 'quarry', 'barrenland'}
 EXPORTS = {'csv', 'xlsx', 'pdf', 'geojson', 'gpkg', 'shp.zip', 'map.png', 'map.jpg', 'map.pdf', 'qa.json'}
 
 
@@ -163,7 +165,7 @@ def assessments(sources, row, mode, selected, out, progress, check, output=None,
     if any(v not in CROPS and v is not None for v in aliases.values()):
         raise DataError('A configured crop mapping uses an unsupported standard crop name.')
     qa = {'repaired_geometries': 0, 'source_overlap_ha': {}, 'land_overlap_ha': 0.,
-          'unmapped_land_classes_ha': {}, 'slivers_under_1m2': 0, 'land_objects': [], 'zone_objects': {}}
+          'unmapped_land_classes_ha': {}, 'source_crop_labels': [], 'land_polygons': 0, 'slivers_under_1m2': 0, 'land_objects': [], 'zone_objects': {}}
     progress(3, 'Reading provincial boundary')
     province = (sources.boundary(row) if row.get('municipality') else sources.province(row['id'])).to_crs(CRS_AREA)
     province.geometry = province.geometry.map(geom_polygon)
@@ -208,6 +210,7 @@ def assessments(sources, row, mode, selected, out, progress, check, output=None,
         return masks
 
     stats = defaultdict(lambda: defaultdict(float))
+    observed_crops = set()
     pending = []
     occupied = {}
     export_path = out / 'assessment.gpkg'
@@ -218,13 +221,15 @@ def assessments(sources, row, mode, selected, out, progress, check, output=None,
         qa['land_objects'].append({key: meta[key] for key in ('Key', 'ETag')})
         for path in sources.land_files(meta, out):
             for raw, geom, attrs in source_rows(path, 'landuse', province, qa, check):
+                qa['land_polygons'] += 1
                 crop = crop_name(raw, aliases)
                 if not crop:
                     if canonical(raw) not in NON_CROP:
                         unmapped = qa['unmapped_land_classes_ha']
                         unmapped[raw or '(blank)'] = unmapped.get(raw or '(blank)', 0) + geom.area / 10000
                     continue
-                if selected and crop not in selected:
+                observed_crops.add(crop)
+                if selected and crop not in selected and not ('Rice' in selected and crop in RICE_TYPES):
                     continue
                 for tile, cell in cells(geom):
                     portion = geom_polygon(geom.intersection(cell))
@@ -260,6 +265,7 @@ def assessments(sources, row, mode, selected, out, progress, check, output=None,
                             if len(pending) >= 250:
                                 flush(pending, export_path)
     flush(pending, export_path)
+    qa['source_crop_labels'] = sorted(observed_crops)
     if not export_path.exists():
         frame = gpd.GeoDataFrame({'crop_name': [], 'assessment': [], 'area_ha': []}, geometry=[], crs=CRS_AREA)
         pyogrio.write_dataframe(frame, export_path, layer='assessment', geometry_type='MultiPolygon')
@@ -341,6 +347,13 @@ def write_products(out, result, frame, province, output=None):
         profile.append(['Geographic level', result['level']])
         for name in result.get('missing_provinces', []):
             profile.append(['Excluded province', name])
+        diagnostics = workbook.create_sheet('Source diagnostics')
+        diagnostics.append(['Intersecting source polygons', qa.get('land_polygons', 0)])
+        diagnostics.append(['Recognized crops in area', ', '.join(qa.get('source_crop_labels', []))])
+        diagnostics.append(['Unconfirmed source label', 'Source polygon area (ha, may overlap)'])
+        for label, area in sorted(qa.get('unmapped_land_classes_ha', {}).items()):
+            diagnostics.append([label, round(area, 6)])
+            diagnostics.cell(diagnostics.max_row, 1).data_type = 's'
         workbook.save(out / 'assessment.xlsx')
     if output == 'shp' or (output is None and len(frame)):
         with tempfile_directory(out) as directory:
@@ -431,7 +444,7 @@ def write_products(out, result, frame, province, output=None):
             image.save(out / 'assessment.map.pdf', resolution=150)
     if output is not None:
         choices = {'jpeg': ['map.jpg'], 'shp': ['shp.zip'], 'table': ['xlsx', 'csv']}
-        result['exports'] = choices[output]
+        result['exports'] = choices[output] + ['qa.json']
         return
     styles = getSampleStyleSheet()
     title = escape(result['area']) + ' Crop-Based Land Use Assessment'
@@ -533,7 +546,14 @@ def regional_assessment(sources, rows, region, mode, selected, out, progress, ch
         {'crop_name': [], 'assessment': [], 'area_ha': []}, geometry=[], crs=CRS_AREA)
     if not target.exists():
         pyogrio.write_dataframe(frame, target, layer='assessment', geometry_type='MultiPolygon')
-    qa = {'assessment_area_ha': coverage.area.iloc[0] / 10000, 'missing_provinces': missing,
+    unmapped = defaultdict(float)
+    for summary in summaries:
+        for label, area in summary['unmapped_land_classes_ha'].items():
+            unmapped[label] += area
+    qa = {'land_polygons': sum(i['land_polygons'] for i in summaries),
+          'source_crop_labels': sorted({crop for i in summaries for crop in i['source_crop_labels']}),
+          'unmapped_land_classes_ha': dict(unmapped),
+          'assessment_area_ha': coverage.area.iloc[0] / 10000, 'missing_provinces': missing,
           'province_results': summaries, 'agricultural_zone_area_ha': dict(zones),
           'province_area_ha': coverage.area.iloc[0] / 10000,
           'repaired_geometries': sum(i['repaired_geometries'] for i in summaries),

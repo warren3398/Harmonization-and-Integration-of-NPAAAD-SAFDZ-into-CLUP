@@ -150,15 +150,25 @@ function renderStats(result, id) {
   $('results').hidden = false;
   $('map-title').textContent = result.area;
   $('badge').textContent = result.level.toUpperCase() + ' · SATELLITE';
-  $('result-note').textContent = Object.keys(result.stats).length
-    ? (result.missing_provinces?.length ? 'Partial coverage. Excluded: ' + result.missing_provinces.join(', ') : 'Hectares calculated within the selected boundary.')
-    : 'No confirmed crop polygons matched the selection. See the QA report for unmapped source labels.';
+  const qa = result.qa || {};
+  const available = qa.source_crop_labels || [];
+  const unknown = Object.keys(qa.unmapped_land_classes_ha || {});
+  let note = 'Hectares calculated within the selected boundary.';
+  if (!Object.keys(result.stats).length) {
+    if (qa.land_polygons === 0) note = 'No land-use polygons intersect the selected boundary.';
+    else if (available.length) note = 'No polygons matched the selected crops. Crops found in this area: ' + available.join(', ') + '.';
+    else if (unknown.length) note = 'Land-use polygons were found, but none had a confirmed crop label.';
+    else note = 'No crop polygons were identified in the land-use data for this area.';
+  }
+  if (unknown.length) note += ' Unconfirmed source labels are listed in the QA/QC report.';
+  if (result.missing_provinces?.length) note += ' Partial coverage. Excluded: ' + result.missing_provinces.join(', ') + '.';
+  $('result-note').textContent = note;
   const rows = Object.entries(result.stats).sort((a, b) => b[1]['Total mapped'] - a[1]['Total mapped']);
   const fields = [...new Set(['Total mapped', ...rows.flatMap(([, values]) => Object.keys(values))])];
   const totals = Object.fromEntries(fields.map(field => [field, rows.reduce((sum, [, r]) => sum + (r[field] || 0) * (field.endsWith('(%)') && !field.startsWith('Share of ') ? r['Total mapped'] / rows.reduce((total, [, crop]) => total + crop['Total mapped'], 0) : 1), 0)]));
   $('cards').replaceChildren();
   for (const field of ['Total mapped', 'Agricultural NPAAAD', 'Agricultural SAFDZ', 'Missing coverage']) {
-    if (!(field in totals)) continue;
+    if (!rows.length || !(field in totals)) continue;
     const card = node('div', field, $('cards'));
     card.className = 'card';
     node('strong', number.format(totals[field]) + ' ha', card);
@@ -175,7 +185,8 @@ function renderStats(result, id) {
   const head = node('tr', undefined, node('thead', undefined, $('matrix')));
   ['Crop', ...fields.map(field => field.endsWith('(%)') ? field : field + ' (ha)')].forEach(field => node('th', field, head));
   const body = node('tbody', undefined, $('matrix'));
-  [...rows, ['Total', totals]].forEach(([crop, values]) => {
+  $('matrix').hidden = rows.length === 0;
+  (rows.length ? [...rows, ['Total', totals]] : []).forEach(([crop, values]) => {
     const line = node('tr', undefined, body);
     node('td', crop, line);
     fields.forEach(field => node('td', number.format(values[field] || 0), line));
