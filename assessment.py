@@ -119,9 +119,9 @@ def source_rows(path, role, province, qa, check, wanted=None):
             break
 
 
-def zone_masks(path, role, province, qa, check, measure=True):
+def zone_masks(records, role, qa, check, measure=True):
     raw_groups = defaultdict(list)
-    for raw, geom, _ in source_rows(path, role, province, qa, check):
+    for raw, geom, _ in records:
         raw_groups[raw.upper()].append(geom)
     # Stop an internal source overlap from being counted twice. Conflicting
     # codes are unknown until the data owner reconciles the source.
@@ -141,6 +141,27 @@ def zone_masks(path, role, province, qa, check, measure=True):
     agricultural = sh.union_all([geom for code, geom in codes.items() if code in allowed]) if measure else None
     return codes, agricultural
 
+
+
+def local_zone_index(path, role, boundary, qa, check):
+    records = []
+    coordinates = 0
+    for record in source_rows(path, role, boundary, qa, check):
+        coordinates += sh.get_num_coordinates(record[1])
+        if coordinates > 120_000 or len(records) >= 4000:
+            return None
+        records.append(record)
+    return records, sh.STRtree([geom for _, geom, _ in records])
+
+
+def local_zone_rows(index, clip):
+    records, tree = index
+    # Match the input feature order used when dissolving overlapping classes.
+    for number in sorted(tree.query(clip, predicate='intersects')):
+        label, geom, attributes = records[number]
+        clipped = geom_polygon(geom.intersection(clip))
+        if clipped.area > 0:
+            yield label, clipped, attributes
 
 def zone_partitions(shape, codes):
     remaining = shape
@@ -188,12 +209,20 @@ def assessments(sources, row, mode, selected, out, progress, check, output=None,
     if boundary.is_empty:
         raise DataError('The selected boundary has no valid polygon.')
     zone_files = {}
+    zone_indices = {}
     for index, role in enumerate(required):
         meta = row['zones'][role]
         progress(10 + 12 * index, f'Retrieving {role.upper()} source')
         check()
         qa['zone_objects'][role] = {key: meta[key] for key in ('Key', 'ETag')}
         zone_files[role] = sources.file(ZONES, meta['Key'], meta)
+        if focused and row.get('municipality'):
+            progress(12 + 12 * index, f'Indexing {role.upper()} within the selected boundary')
+            index_qa = {'repaired_geometries': 0}
+            zone_index = local_zone_index(zone_files[role], role, province, index_qa, check)
+            if zone_index is not None:
+                zone_indices[role] = zone_index
+                qa['repaired_geometries'] += index_qa['repaired_geometries']
 
     cell_size = 3500
     measured = {}
@@ -215,7 +244,9 @@ def assessments(sources, row, mode, selected, out, progress, check, output=None,
         tile_qa = {'repaired_geometries': 0, 'source_overlap_ha': {}}
         areas = {}
         for role, path in zone_files.items():
-            masks[role], ag = zone_masks(path, role, tile_province, tile_qa, check, measure=not focused)
+            records = local_zone_rows(zone_indices[role], local) if role in zone_indices else (
+                source_rows(path, role, tile_province, tile_qa, check))
+            masks[role], ag = zone_masks(records, role, tile_qa, check, measure=not focused)
             if ag is not None:
                 areas[role] = ag.area
         if tile not in measured:
