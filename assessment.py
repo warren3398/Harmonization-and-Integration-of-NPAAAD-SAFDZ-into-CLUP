@@ -29,6 +29,10 @@ COLORS = {'Both': '#187354', 'NPAAAD only': '#4e65aa', 'SAFDZ only': '#a763b0',
 CROP_MAP = {canonical(name): name for name in CROPS}
 CROP_MAP.update({'mixedvegetables': 'Vegetables', 'diversifiedcrop': 'Diversified Crops', 'abacca': 'Abaca', 'maize': 'Corn', 'sugarcaneplantation': 'Sugarcane', 'coconutplantation': 'Coconut',
                  'palay': 'Rice', 'ricelandirrigated': 'Irrigated Rice', 'ricelandrainfed': 'Rainfed Rice'})
+# BSWM Map Guidebook, Table 5 (Land Use). Keep the source abbreviation
+# in lu_original and use its documented irrigation type for crop selection.
+BSWM_RICE_CODES = {'pri': 'Irrigated Rice', 'prn': 'Rainfed Rice',
+                   'tri': 'Irrigated Rice', 'trn': 'Rainfed Rice'}
 RICE_TYPES = {'Irrigated Rice', 'Rainfed Rice', 'Upland Rice'}
 NON_CROP = {'buildup', 'builtup', 'forest', 'grassland', 'shrubland', 'shrubs', 'water', 'fishpond',
             'mangrove', 'river', 'riverwash', 'reservoir', 'lake', 'pasture', 'quarry', 'barrenland'}
@@ -39,6 +43,8 @@ def crop_name(raw, aliases):
     key = canonical(raw)
     if key in aliases:
         return aliases[key]
+    if key in BSWM_RICE_CODES:
+        return BSWM_RICE_CODES[key]
     if key in CROP_MAP:
         return CROP_MAP[key]
     simplified = re.sub(r'\s*\([^()]*\)\s*$', '', raw.strip())
