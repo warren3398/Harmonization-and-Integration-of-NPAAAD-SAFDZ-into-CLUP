@@ -61,10 +61,10 @@ async function previewBoundary() {
   if (area.region === 'Nationwide') {
     overlays.forEach(layer => layer.remove());
     overlays = [];
-    $('map-title').textContent = 'Nationwide';
-    map.setView([12.55, 122.5], 5);
+    $('legend').replaceChildren();
     return;
   }
+  map.invalidateSize({pan: false});
   $('map-title').textContent = ['barangay','municipality','province','region'].map(key =>
     area[key] ? $(key).selectedOptions[0]?.textContent : null).filter(Boolean).join(' · ');
   try {
@@ -84,8 +84,12 @@ $('region').onchange = () => {
   resetCropOptions();
   areaRequest++;
   const nationwide = $('region').value === 'Nationwide';
+  if ($('map-panel').hidden !== nationwide) $('results').hidden = true;
+  $('map-panel').hidden = nationwide;
+  $('workspace').classList.toggle('table-only', nationwide);
   for (const format of $('settings').querySelectorAll('input[name=output]')) {
     format.disabled = nationwide && format.value !== 'table';
+    format.closest('label').hidden = format.disabled;
     if (nationwide && format.value === 'table') format.checked = true;
   }
   resetArea('province', 'Entire region');
@@ -275,6 +279,8 @@ function renderStats(result, id) {
   const rows = Object.entries(result.stats).sort((a, b) => b[1]['Total mapped'] - a[1]['Total mapped']);
   const fields = [...new Set(['Total mapped', ...rows.flatMap(([, values]) => Object.keys(values))])];
   const totals = Object.fromEntries(fields.map(field => [field, rows.reduce((sum, [, r]) => sum + (r[field] || 0) * (field.endsWith('(%)') && !field.startsWith('Share of ') ? r['Total mapped'] / rows.reduce((total, [, crop]) => total + crop['Total mapped'], 0) : 1), 0)]));
+  $('cards').hidden = result.level === 'Nationwide';
+  $('chart').hidden = $('cards').hidden;
   $('cards').replaceChildren();
   for (const field of ['Within selected zone(s)', 'Total mapped', 'Agricultural NPAAAD', 'Agricultural SAFDZ', 'Missing coverage']) {
     if (!rows.length || !(field in totals)) continue;
@@ -337,7 +343,7 @@ function renderStats(result, id) {
   result.exports.forEach(ext => node('a', labels[ext], $('exports')).href = api + '/api/jobs/' + id + '/files/' + ext);
 }
 async function renderMap(result, id) {
-  if (!map) return;
+  if (!map || result.level === 'Nationwide') return;
   const paths = ['boundary.geojson', 'map.geojson'].map(file => '/api/jobs/' + id + '/files/' + file);
   const [boundary, classified] = await Promise.all(paths.map(path => fetchData(path)));
   if (previewLayer) previewLayer.remove();

@@ -44,3 +44,5 @@ footer{padding-top:18px;text-align:center;border-top:1px solid #dce7ea}
 .zone-legend dt{font-weight:700}
 .zone-legend dd{margin:0}
 .matrix-note{padding:0 20px;color:#50675f;font-size:.85rem}
+
+.workspace.table-only,.table-only .output{grid-template-columns:minmax(0,1fr)}
