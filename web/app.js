@@ -2,7 +2,7 @@ const $ = id => document.getElementById(id);
 const api = window.PCLAM_API || '';
 let provinces = [], current = null, map, overlays = [];
 const modes = {combined: ['npaaad', 'safdz'], npaaad: ['npaaad'], safdz: ['safdz']};
-const labels = {csv:'CSV statistics',xlsx:'Excel matrix',pdf:'PDF assessment report',gpkg:'GeoPackage',
+const labels = {csv:'CSV table', 'npaaad.csv':'NPAAAD CSV', 'safdz.csv':'SAFDZ CSV',xlsx:'Excel matrix',pdf:'PDF assessment report',gpkg:'GeoPackage',
   'shp.zip':'Shapefile ZIP',geojson:'GeoJSON','qa.json':'QA/QC JSON','map.png':'Map PNG','map.pdf':'Map PDF','map.jpg':'Download JPEG map'};
 const number = new Intl.NumberFormat('en-PH', {maximumFractionDigits: 2});
 function node(tag, text, parent) {
@@ -245,6 +245,12 @@ async function init() {
     $('region').options[0].textContent = 'GIS catalog unavailable';
   }
 }
+function renderZoneRow(parent, values) {
+  const row = node('tr', undefined, parent);
+  node('th', values[0], row).scope = 'row';
+  for (const value of values.slice(1)) node('td', number.format(value), row);
+}
+
 function renderStats(result, id) {
   $('results').hidden = false;
   $('map-title').textContent = result.area;
@@ -284,16 +290,38 @@ function renderStats(result, id) {
     node('span', undefined, track).style.width = 100 * values['Total mapped'] / rows[0][1]['Total mapped'] + '%';
     node('span', number.format(values['Total mapped']) + ' ha', bar);
   });
-  $('matrix').replaceChildren();
-  const head = node('tr', undefined, node('thead', undefined, $('matrix')));
-  ['Crop', ...fields.map(field => field.endsWith('(%)') ? field : field + ' (ha)')].forEach(field => node('th', field, head));
-  const body = node('tbody', undefined, $('matrix'));
-  $('matrix').hidden = rows.length === 0;
-  (rows.length ? [...rows, ['Total', totals]] : []).forEach(([crop, values]) => {
-    const line = node('tr', undefined, body);
-    node('td', crop, line);
-    fields.forEach(field => node('td', number.format(values[field] || 0), line));
-  });
+  const matrix = $('matrix');
+  matrix.replaceChildren();
+  if (result.zone_tables?.length) {
+    for (const sheet of result.zone_tables) {
+      const section = node('section', undefined, matrix);
+      section.className = 'zone-matrix';
+      node('h3', sheet.zone.toUpperCase() + ' crop area (ha)', section);
+      const scroll = node('div', undefined, section);
+      scroll.className = 'matrix';
+      const table = node('table', undefined, scroll);
+      const thead = node('thead', undefined, table);
+      const descriptions = node('tr', undefined, thead);
+      ['', ...sheet.labels].forEach(label => node('th', label, descriptions));
+      const codes = node('tr', undefined, thead);
+      ['Crops', ...sheet.columns].forEach(code => node('th', code, codes).scope = 'col');
+      const body = node('tbody', undefined, table);
+      sheet.rows.forEach(row => renderZoneRow(body, row));
+      renderZoneRow(node('tfoot', undefined, table), sheet.total);
+    }
+    if (result.zone_tables.length > 1) {
+      node('p', 'Each table summarizes the same crop polygons by a different zoning layer. Adding the totals would count some areas twice.', matrix).className = 'matrix-note';
+    }
+  } else if (rows.length) {
+    const scroll = node('div', undefined, matrix);
+    scroll.className = 'matrix';
+    const table = node('table', undefined, scroll);
+    const head = node('tr', undefined, node('thead', undefined, table));
+    ['Crop', ...fields.map(field => field.endsWith('(%)') ? field : field + ' (ha)')].forEach(field => node('th', field, head));
+    const body = node('tbody', undefined, table);
+    [...rows, ['Total', totals]].forEach(([crop, values]) =>
+      renderZoneRow(body, [crop, ...fields.map(field => values[field] || 0)]));
+  }
   $('exports').replaceChildren();
   result.exports.forEach(ext => node('a', labels[ext], $('exports')).href = api + '/api/jobs/' + id + '/files/' + ext);
 }

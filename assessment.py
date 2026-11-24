@@ -36,7 +36,11 @@ BSWM_RICE_CODES = {'pri': 'Irrigated Rice', 'prn': 'Rainfed Rice',
 RICE_TYPES = {'Irrigated Rice', 'Rainfed Rice', 'Upland Rice'}
 NON_CROP = {'buildup', 'builtup', 'forest', 'grassland', 'shrubland', 'shrubs', 'water', 'fishpond',
             'mangrove', 'river', 'riverwash', 'reservoir', 'lake', 'pasture', 'quarry', 'barrenland'}
-EXPORTS = {'csv', 'xlsx', 'pdf', 'geojson', 'gpkg', 'shp.zip', 'map.png', 'map.jpg', 'map.pdf', 'qa.json'}
+ZONE_COLUMNS = {'safdz': [str(i) for i in range(1, 11)] + ['BU', 'Others'],
+                'npaaad': list('ABCDEFGH') + ['BU', 'Others']}
+ZONE_LABELS = {'safdz': {'1': 'Strategic Crop Sub-Development Zone',
+                        '2': 'Strategic Livestock Sub-Development Zone'}, 'npaaad': {}}
+EXPORTS = {'csv', 'npaaad.csv', 'safdz.csv', 'xlsx', 'pdf', 'geojson', 'gpkg', 'shp.zip', 'map.png', 'map.jpg', 'map.pdf', 'qa.json'}
 
 
 def crop_name(raw, aliases):
@@ -192,6 +196,18 @@ def class_name(np, sa, mode):
     return 'Outside both'
 
 
+
+def zone_tables(areas, crops):
+    tables = []
+    for role, crop_areas in areas.items():
+        columns = ZONE_COLUMNS[role]
+        rows = [[crop, *[crop_areas.get(crop, {}).get(code, 0.) for code in columns]] for crop in sorted(crops)]
+        totals = [sum(row[index] for row in rows) for index in range(1, len(columns) + 1)]
+        labels = [ZONE_LABELS[role].get(code, '') for code in columns]
+        tables.append({'zone': role, 'columns': columns, 'labels': labels,
+                       'rows': rows, 'total': ['Total', *totals]})
+    return tables
+
 def assessments(sources, row, mode, selected, out, progress, check, output=None, intermediate=False, focused=False):
     required = ('npaaad', 'safdz') if mode == 'combined' else (mode,)
     missing = [role.upper() for role in required if role not in row['zones']]
@@ -262,6 +278,7 @@ def assessments(sources, row, mode, selected, out, progress, check, output=None,
     occupied = {}
     export_path = out / 'assessment.gpkg'
     feature_count = 0
+    matrix_areas = {role: defaultdict(lambda: defaultdict(float)) for role in required} if output == 'table' else {}
     store_geometry = not (focused and intermediate and output == 'table')
     total = len(row['land'])
     for index, meta in enumerate(sorted(row['land'], key=lambda m: m['Key'])):
@@ -291,6 +308,14 @@ def assessments(sources, row, mode, selected, out, progress, check, output=None,
                     occupied[tile] = sh.union(occupied.get(tile, Polygon()), remaining)
                     masks = tile_masks(tile, cell)
                     s = stats[crop]
+                    for role, crop_areas in matrix_areas.items():
+                        for code, coverage in masks.get(role, {}).items():
+                            if not code or coverage.is_empty or not remaining.intersects(coverage):
+                                continue
+                            hectares = remaining.intersection(coverage).area / 10000
+                            if hectares:
+                                column = code if code in ZONE_COLUMNS[role] else 'Others'
+                                crop_areas[crop][column] += hectares
                     np_zones = masks.get('npaaad', {})
                     sa_zones = masks.get('safdz', {})
                     if focused:
@@ -370,7 +395,10 @@ def assessments(sources, row, mode, selected, out, progress, check, output=None,
               'stats': stats, 'qa': qa, 'features': feature_count, 'colors': COLORS, 'focused': focused,
               'area': row.get('area', row['name']), 'level': row.get('level', 'Province')}
     if intermediate:
+        result['matrix_areas'] = matrix_areas
         return result
+    if matrix_areas:
+        result['zone_tables'] = zone_tables(matrix_areas, stats)
     progress(95, 'Preparing selected output')
     write_products(out, result, pyogrio.read_dataframe(export_path), province, output)
     return result
@@ -410,18 +438,57 @@ def write_products(out, result, frame, province, output=None):
                 totals[i] = sum(row[i + 1] * row[1] for row in matrix[1:]) / sum(weights)
         matrix.append(['Total', *[round(value, 6) for value in totals]])
     if output in (None, 'table'):
-        with (out / 'assessment.csv').open('w', newline='', encoding='utf-8-sig') as file:
-            csv.writer(file).writerows(matrix)
         workbook = Workbook()
-        sheet = workbook.active
-        sheet.title = 'Crop assessment'
-        for line in matrix:
-            sheet.append(line)
-        sheet.freeze_panes = 'B2'
-        sheet.auto_filter.ref = sheet.dimensions
+        tables = result.get('zone_tables', [])
+        csv_exports = []
+        if tables:
+            from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
+            from openpyxl.utils import get_column_letter
+
+            for index, table in enumerate(tables):
+                role = table['zone']
+                sheet = workbook.active if index == 0 else workbook.create_sheet()
+                sheet.title = role.upper()
+                table_rows = [['Area (ha)', *table['labels']], ['Crops', *table['columns']],
+                              *table['rows'], table['total']]
+                filename = 'csv' if len(tables) == 1 else role + '.csv'
+                with (out / ('assessment.' + filename)).open('w', newline='', encoding='utf-8-sig') as file:
+                    csv.writer(file).writerows([
+                        [round(v, 6) if isinstance(v, float) else v for v in row] for row in table_rows
+                    ])
+                csv_exports.append(filename)
+                for row in table_rows:
+                    sheet.append(row)
+                sheet.freeze_panes = 'B3'
+                sheet.row_dimensions[1].height = 65
+                for number, column in enumerate(sheet.columns, start=1):
+                    sheet.column_dimensions[get_column_letter(number)].width = 24 if number == 1 else 15
+                    for cell in column:
+                        cell.border = Border(bottom=Side(style='thin', color='BCCAC5'),
+                                             right=Side(style='thin', color='BCCAC5'))
+                        if cell.row <= 2 or cell.row == len(table_rows):
+                            cell.font = Font(bold=True, color='163F32')
+                            cell.fill = PatternFill('solid', fgColor='E4F0EA')
+                            cell.alignment = Alignment(wrap_text=True, vertical='center')
+                        if number > 1 and cell.row > 2:
+                            cell.number_format = '#,##0.00'
+        else:
+            with (out / 'assessment.csv').open('w', newline='', encoding='utf-8-sig') as file:
+                csv.writer(file).writerows(matrix)
+            csv_exports.append('csv')
+            sheet = workbook.active
+            sheet.title = 'Crop assessment'
+            for line in matrix:
+                sheet.append(line)
+            sheet.freeze_panes = 'B2'
+            sheet.auto_filter.ref = sheet.dimensions
         profile = workbook.create_sheet('Coverage')
         profile.append(['Assessment area', result['area']])
         profile.append(['Geographic level', result['level']])
+        if tables:
+            profile.append(['Others', 'Source zone classes without their own column. Areas without an assigned zone are excluded.'])
+            if len(tables) > 1:
+                profile.append(['Combined', 'Both sheets summarize the same crop polygons independently. Do not add the sheet totals.'])
         for name in result.get('missing_provinces', []):
             profile.append(['Excluded province', name])
         diagnostics = workbook.create_sheet('Source diagnostics')
@@ -520,7 +587,7 @@ def write_products(out, result, frame, province, output=None):
             image.save(out / 'assessment.map.png')
             image.save(out / 'assessment.map.pdf', resolution=150)
     if output is not None:
-        choices = {'jpeg': ['map.jpg'], 'shp': ['shp.zip'], 'table': ['xlsx', 'csv']}
+        choices = {'jpeg': ['map.jpg'], 'shp': ['shp.zip'], 'table': ['xlsx', *csv_exports] if output == 'table' else []}
         result['exports'] = choices[output] + ['qa.json']
         return
     styles = getSampleStyleSheet()
@@ -579,6 +646,8 @@ def regional_assessment(sources, rows, region, mode, selected, out, progress, ch
     zones = defaultdict(float)
     summaries = []
     required = {'npaaad', 'safdz'} if mode == 'combined' else {mode}
+    matrix_areas = {role: defaultdict(lambda: defaultdict(float))
+                    for role in ('npaaad', 'safdz') if role in required} if output == 'table' else {}
     eligible = [row for row in rows if row['land'] and required.issubset(row['zones'])]
     missing = [row['name'] for row in rows if row not in eligible]
     if not eligible:
@@ -598,6 +667,10 @@ def regional_assessment(sources, rows, region, mode, selected, out, progress, ch
                 frame = pyogrio.read_dataframe(folder / 'assessment.gpkg')
                 pyogrio.write_dataframe(frame, target, layer='assessment', append=target.exists(),
                                         geometry_type='MultiPolygon', promote_to_multi=True)
+        for role, crop_areas in result['matrix_areas'].items():
+            for crop, values in crop_areas.items():
+                for code, area in values.items():
+                    matrix_areas[role][crop][code] += area
         areas.append(sources.province(row['id']).to_crs(CRS_AREA).geometry.map(geom_polygon).union_all().simplify(80, preserve_topology=True))
         summaries.append({'province': row['name'], **result['qa']})
         for key, value in result['qa']['agricultural_zone_area_ha'].items():
@@ -643,6 +716,8 @@ def regional_assessment(sources, rows, region, mode, selected, out, progress, ch
               'mode': mode, 'stats': stats, 'qa': qa, 'missing_provinces': missing,
               'bounds': list(outline.to_crs('EPSG:4326').total_bounds), 'features': feature_count, 'colors': COLORS, 'focused': focused}
     progress(95, 'Preparing selected output')
+    if matrix_areas:
+        result['zone_tables'] = zone_tables(matrix_areas, stats)
     write_products(out, result, frame, outline, output)
     return result
 

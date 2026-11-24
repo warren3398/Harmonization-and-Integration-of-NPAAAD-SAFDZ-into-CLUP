@@ -26,3 +26,12 @@ select,summary{font-size:.9rem;background:#f6fafb;border-color:#cddde4;min-heigh
 footer{padding-top:18px;text-align:center;border-top:1px solid #dce7ea}
 @media(max-width:900px){.workspace{grid-template-columns:1fr}.hero-inner{max-width:82%}#map{height:460px}}
 @media(max-width:550px){.hero{min-height:0;padding:20px 16px 95px;align-items:flex-start}.hero::before{inset:48px 0 0;background:linear-gradient(180deg,#092f28 2%,#092f28ce 48%,#092f2840 100%),url(hero.webp) center/cover no-repeat}.hero-inner{max-width:100%}aside{padding:17px}.fields{gap:0 10px}#map{height:390px}}
+
+.zone-matrix h3{padding:16px 20px 7px;font-size:1rem}
+.zone-matrix table{min-width:820px}
+.zone-matrix thead th{position:static;white-space:normal;text-align:center;border-right:1px solid #d6e2dc}
+.zone-matrix thead tr:first-child th{vertical-align:top;min-width:56px}
+.zone-matrix thead tr:first-child th:nth-child(2),.zone-matrix thead tr:first-child th:nth-child(3){min-width:116px}
+.zone-matrix tbody th{position:static;background:white}
+.zone-matrix tfoot{background:#e4f0ea;font-weight:700}
+.matrix-note{padding:0 20px;color:#50675f;font-size:.85rem}
