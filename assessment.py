@@ -4,7 +4,7 @@ import os
 import re
 from collections import defaultdict
 from functools import lru_cache
-from math import cos, floor, log10, radians
+from math import floor, log10
 from pathlib import Path
 
 import geopandas as gpd
@@ -403,6 +403,7 @@ def assessments(sources, row, mode, selected, out, progress, check, output=None,
     occupied.clear()
     tile_masks.cache_clear()
     if focused:
+        zone_indices.clear()
         qa['agricultural_zone_area_ha'] = {}
     else:
         for tile, cell in cells(boundary):
@@ -561,8 +562,11 @@ def write_products(out, result, frame, province, output=None):
         frame.to_crs('EPSG:4326').to_file(out / 'assessment.geojson', driver='GeoJSON', engine='pyogrio')
         if (out / 'assessment.geojson').stat().st_size > 30_000_000:
             (out / 'assessment.geojson').unlink()
-    if output in (None, 'jpeg'):
-        map_crs = 'EPSG:3857' if output == 'jpeg' else CRS_AREA
+    if output == 'jpeg':
+        from map_layout import draw_jpeg
+        draw_jpeg(out / 'assessment.map.jpg', result, view, province)
+    elif output is None:
+        map_crs = CRS_AREA
         map_area = province.to_crs(map_crs)
         map_view = view.to_crs(map_crs)
         width, height = 1560, 1100
@@ -570,10 +574,6 @@ def write_products(out, result, frame, province, output=None):
         draw = ImageDraw.Draw(image)
         xmin, ymin, xmax, ymax = map_area.total_bounds
         scale = min((width - 520) / (xmax - xmin), (height - 180) / (ymax - ymin))
-        satellite = False
-        if output == 'jpeg':
-            # Match the Esri image footprint to the exact map pixel rectangle.
-            satellite = add_satellite_background(image, xmin, ymin, scale)
         def xy(coords):
             return [(65 + (x - xmin) * scale, height - 75 - (y - ymin) * scale) for x, y, *_ in coords]
     
@@ -584,19 +584,12 @@ def write_products(out, result, frame, province, output=None):
                     draw_on.polygon(xy(hole.coords), fill=0 if isinstance(fill, int) else '#e1eee9')
     
         land = map_area.geometry.union_all()
-        if satellite:
-            for part in sh.get_parts(geom_polygon(land)):
-                draw.line(xy(part.exterior.coords), fill='#fff0b0', width=3)
-        else:
-            paint(land, '#f5f5e8', draw, '#496158')
+        paint(land, '#f5f5e8', draw, '#496158')
         active = []
         for feature in map_view.itertuples():
             mask = Image.new('1', image.size)
             paint(feature.geometry, 1, ImageDraw.Draw(mask))
-            if satellite:
-                image.paste(COLORS[feature.assessment], mask=mask.convert('L').point([0] * 255 + [158]))
-            else:
-                image.paste(COLORS[feature.assessment], mask=mask)
+            image.paste(COLORS[feature.assessment], mask=mask)
             active.append(feature.assessment)
         draw.text((52, 39), f"{result['area']} | Provincial Crop-Based Land Use Assessment Map",
                   fill='#14392f', font_size=27)
@@ -606,8 +599,7 @@ def write_products(out, result, frame, province, output=None):
             y = 225 + index * 38
             draw.rectangle((1160, y, 1180, y + 20), fill=COLORS[label])
             draw.text((1190, y), label, fill='#14392f', font_size=17)
-        latitude = (result['bounds'][1] + result['bounds'][3]) / 2
-        ratio = cos(radians(latitude)) if output == 'jpeg' else 1
+        ratio = 1
         bar_m = max(1, round(140 * ratio / scale, -int(log10(max(140 * ratio / scale, 1)))))
         bar_px = bar_m * scale / ratio
         bar_label = f'{bar_m / 1000:g} km' if bar_m >= 1000 else f'{bar_m:g} m'
@@ -615,14 +607,8 @@ def write_products(out, result, frame, province, output=None):
         draw.text((1160, 526), f'{bar_label} (approx.)', fill='#14392f', font_size=16)
         if result.get('missing_provinces'):
             draw.text((1160, 565), 'Partial regional coverage', fill='#8d351f', font_size=20)
-        if output == 'jpeg':
-            source = ('Imagery: Esri, Maxar, Earthstar Geographics and the GIS User Community'
-                      if satellite else 'Satellite imagery unavailable at export time')
-            draw.text((65, height - 38), source, fill='#14392f', font_size=14)
-            image.save(out / 'assessment.map.jpg', quality=95, subsampling=0, dpi=(180, 180))
-        else:
-            image.save(out / 'assessment.map.png')
-            image.save(out / 'assessment.map.pdf', resolution=150)
+        image.save(out / 'assessment.map.png')
+        image.save(out / 'assessment.map.pdf', resolution=150)
     if output is not None:
         choices = {'jpeg': ['map.jpg'], 'shp': ['shp.zip'], 'table': ['xlsx', *csv_exports] if output == 'table' else []}
         result['exports'] = choices[output] + ['qa.json']
@@ -757,31 +743,6 @@ def regional_assessment(sources, rows, region, mode, selected, out, progress, ch
         result['zone_tables'] = zone_tables(matrix_areas, stats)
     write_products(out, result, frame, outline, output)
     return result
-
-
-def add_satellite_background(image, xmin, ymin, scale):
-    from io import BytesIO
-    from urllib.error import URLError
-    from urllib.parse import urlencode
-    from urllib.request import urlopen
-    from PIL import Image
-
-    left, top, right, bottom = 52, 109, 1125, image.height - 63
-    width, height = right - left, bottom - top
-    origin = image.height - 75
-    bounds = (xmin + (left - 65) / scale, ymin + (origin - bottom) / scale,
-              xmin + (right - 65) / scale, ymin + (origin - top) / scale)
-    params = urlencode({'bbox': ','.join(map(str, bounds)), 'bboxSR': 3857, 'imageSR': 3857,
-                        'size': f'{width},{height}', 'format': 'jpg', 'f': 'image'})
-    try:
-        url = 'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/export?' + params
-        with urlopen(url, timeout=7) as response:
-            data = response.read(5_000_000)
-        with Image.open(BytesIO(data)) as imagery:
-            image.paste(imagery.convert('RGB').resize((width, height)), (left, top))
-        return True
-    except (URLError, OSError, ValueError):
-        return False
 
 
 def landuse_crop_options(sources, rows, out, progress, check, nationwide=False):
