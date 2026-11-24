@@ -188,7 +188,8 @@ def start(request: Request):
         if not any(item['land'] and required.issubset(item['zones']) for item in rows):
             raise HTTPException(422, 'Required GIS layers are missing for this region.')
         row = {'id': request.region, 'name': request.region, 'level': 'Nationwide' if nationwide else 'Region', 'rows': rows}
-    return submit_job(run, request, row)
+    key = ('nationwide-table', request.mode, tuple(sorted(set(request.crops)))) if row.get('level') == 'Nationwide' else None
+    return submit_job(run, request, row, key=key, reuse_pending=False)
 
 
 @app.post('/api/crop-options', status_code=202)
@@ -236,7 +237,7 @@ def run_crop_options(job, rows):
         job['finished'] = time.monotonic()
 
 
-def submit_job(task, *args, key=None):
+def submit_job(task, *args, key=None, reuse_pending=True):
     with job_lock:
         now = time.monotonic()
         for expired_id, old in list(jobs.items()):
@@ -244,14 +245,16 @@ def submit_job(task, *args, key=None):
                 shutil.rmtree(old['folder'], ignore_errors=True)
                 del jobs[expired_id]
         if key is not None:
+            reusable = ('queued', 'running', 'complete') if reuse_pending else ('complete',)
             for job_id, existing in jobs.items():
-                if existing.get('key') == key and existing['state']['status'] in ('queued', 'running', 'complete'):
+                if existing.get('key') == key and existing['state']['status'] in reusable:
                     return {'id': job_id}
         if sum(not item.get('finished') for item in jobs.values()) >= 3:
             raise HTTPException(429, 'The assessment queue is full. Try again after a job completes.')
         if len(jobs) >= 12:
             for cached_id, cached_job in list(jobs.items()):
                 if cached_job.get('key') is not None and cached_job.get('finished'):
+                    shutil.rmtree(cached_job['folder'], ignore_errors=True)
                     del jobs[cached_id]
                     break
         if len(jobs) >= 12:

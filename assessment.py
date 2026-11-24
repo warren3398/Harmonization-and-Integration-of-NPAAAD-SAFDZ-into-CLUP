@@ -127,7 +127,18 @@ def source_schema(path, role):
     return layer, info, field
 
 
-def source_batches(path, layer, columns, bbox, batch_size, check):
+def source_batches(path, layer, columns, bbox, batch_size, check, *, index_features=False):
+    if index_features:
+        # Locate all matches once without allocating geometry in Python. Keep
+        # GDAL's match order because the first crop polygon claims overlaps.
+        check()
+        ids = pyogrio.read_dataframe(path, layer=layer, columns=[], bbox=bbox,
+                                    read_geometry=False, fid_as_index=True).index.to_numpy()
+        for start in range(0, len(ids), batch_size):
+            check()
+            yield pyogrio.read_dataframe(path, layer=layer, columns=columns, force_2d=True,
+                                         fids=ids[start:start + batch_size])
+        return
     offset = 0
     while True:
         check()
@@ -166,7 +177,9 @@ def source_rows(path, role, province, qa, check, wanted=None, *, schema=None,
     clip_bounds = (xmin - margin, ymin - margin, xmax + margin, ymax + margin)
     extra = [f for f in info['fields'] if f != field and f.upper() in {'MUN_NAME', 'ORIG_FID', 'LU_CODE', 'LANDUSE_CODE'}]
     batch_size = 24 if role == 'landuse' else 2
-    for batch in source_batches(path, layer, [field, *extra], bbox, batch_size, check):
+    index_features = prepared and role == 'landuse' and info['driver'] == 'GPKG' and 100 <= info['features'] <= 100_000
+    for batch in source_batches(path, layer, [field, *extra], bbox, batch_size, check,
+                                index_features=index_features):
         if wanted is not None:
             batch = batch[[wanted(str(record[field] or '').strip(), land_use_code({name: record[name] for name in extra}))
                            for record in batch[[field, *extra]].to_dict('records')]]
