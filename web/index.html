@@ -10,25 +10,39 @@
 <script defer src="app.js"></script>
 </head>
 <body>
-<header><div class="brand"><span class="symbol" aria-hidden="true">◈</span><span>ALMED <small> / GIS TOOLS</small></span></div><span class="period">Land Use 2020–2022</span></header>
+<header class="hero">
+<div class="hero-inner">
+<a href="https://almed-gis-portal.onrender.com/#applications">‹ All GIS applications</a>
+<h1>Provincial Crop-Based Land Use Assessment Map</h1>
+<p>Generate crop maps and tables for any available region, province, municipality, or barangay.</p>
+</div>
+</header>
 <main>
-<section class="intro"><div><h1>Provincial Crop-Based<br>Land Use Assessment Map</h1><p>Compare mapped crop areas with agricultural NPAAAD and SAFDZ boundaries.</p></div></section>
 <div class="workspace">
 <aside>
-<h2>Assessment setup</h2>
+<h2>Select assessment area</h2>
 <form id="settings">
-<label for="region">Region</label><select id="region" required><option value="">Loading GIS catalog…</option></select>
-<label for="province">Province</label><select id="province" required disabled><option value="">Choose a region</option></select>
-<label for="crops">Crop classification</label><details id="crop-picker"><summary id="crop-label">All mapped crops</summary><div id="crops"></div></details>
-<label for="mode">Assessment type</label><select id="mode"><option value="combined">Combined NPAAAD–SAFDZ</option><option value="npaaad">Crop-Based NPAAAD</option><option value="safdz">Crop-Based SAFDZ</option></select>
-<p id="availability"></p>
-<button id="run" type="submit" disabled>Run assessment <span aria-hidden="true">→</span></button>
+<div class="fields">
+<div><label for="region">Region</label><select id="region" required><option value="">Loading GIS catalog…</option></select></div>
+<div><label for="province">Province</label><select id="province" disabled><option value="">Entire region</option></select></div>
+<div><label for="municipality">Municipality or city</label><select id="municipality" disabled><option value="">Entire province</option></select></div>
+<div><label for="barangay">Barangay</label><select id="barangay" disabled><option value="">Entire municipality or city</option></select></div>
+<div><label for="crop-picker">Crop classification</label><details id="crop-picker"><summary id="crop-label">All mapped crops</summary><div id="crops"></div></details></div>
+<div><label for="mode">Assessment type</label><select id="mode"><option value="combined">Combined NPAAAD–SAFDZ</option><option value="npaaad">Crop-Based NPAAAD</option><option value="safdz">Crop-Based SAFDZ</option></select></div>
+</div>
+<fieldset class="output"><legend>Output format</legend>
+<label><input type="radio" name="output" value="jpeg" checked><span>JPEG map</span></label>
+<label><input type="radio" name="output" value="shp"><span>Shapefile ZIP</span></label>
+<label><input type="radio" name="output" value="table"><span>Table</span></label>
+</fieldset>
+<p id="availability" role="status"></p>
+<button id="run" type="submit" disabled>Generate output <span aria-hidden="true">→</span></button>
 </form>
 <div id="job" hidden><progress max="100" value="0"></progress><p id="status" role="status"></p><button type="button" id="cancel">Cancel assessment</button></div>
 </aside>
 <section class="panel" aria-label="Assessment map">
-<div class="panel-head"><div><h2>Assessment map</h2><p id="map-title">Philippines</p></div><span id="badge">OVERVIEW</span></div>
-<div id="map" aria-label="Interactive map of the Philippines"></div><div id="legend" aria-label="Map legend"></div>
+<div class="panel-head"><div><h2>Assessment map</h2><p id="map-title">Philippines</p></div><span id="badge">SATELLITE</span></div>
+<div id="map" aria-label="Satellite map of the Philippines"></div><div id="legend" aria-label="Map legend"></div>
 </section>
 </div>
 <section id="results" class="panel results" hidden>
@@ -38,5 +52,5 @@
 <div class="downloads"><h3>Downloads</h3><div id="exports"></div></div>
 </section>
 </main>
-<footer>Philippine Land Use 2020–2022 · NPAAAD · SAFDZ · Administrative boundaries</footer>
+<footer>Department of Agriculture · Bureau of Soils and Water Management</footer>
 </body></html>

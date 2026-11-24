@@ -3,7 +3,7 @@ const api = window.PCLAM_API || '';
 let provinces = [], current = null, map, overlays = [];
 const modes = {combined: ['npaaad', 'safdz'], npaaad: ['npaaad'], safdz: ['safdz']};
 const labels = {csv:'CSV statistics',xlsx:'Excel matrix',pdf:'PDF assessment report',gpkg:'GeoPackage',
-  'shp.zip':'Shapefile ZIP',geojson:'GeoJSON','qa.json':'QA/QC JSON','map.png':'Map PNG','map.pdf':'Map PDF'};
+  'shp.zip':'Shapefile ZIP',geojson:'GeoJSON','qa.json':'QA/QC JSON','map.png':'Map PNG','map.pdf':'Map PDF','map.jpg':'Download JPEG map'};
 const number = new Intl.NumberFormat('en-PH', {maximumFractionDigits: 2});
 function node(tag, text, parent) {
   const element = document.createElement(tag);
@@ -21,26 +21,96 @@ async function fetchData(path, options) {
   return response.json();
 }
 function updateAvailability() {
-  const row = provinces.find(p => p.id === $('province').value);
-  const missing = row ? [...(row.land_available ? [] : ['Land Use']),
-    ...modes[$('mode').value].filter(key => !row.coverage.includes(key)).map(key => key.toUpperCase())] : [];
-  $('availability').textContent = missing.length ? 'Missing coverage: ' + missing.join(', ') : '';
-  $('run').disabled = !row || missing.length > 0 || Boolean(current);
+  const candidates = provinces.filter(p => p.region === $('region').value &&
+    (!$('province').value || p.id === $('province').value));
+  const eligible = candidates.filter(p => p.land_available && modes[$('mode').value].every(key => p.coverage.includes(key)));
+  $('availability').textContent = candidates.length && !eligible.length
+    ? 'Required source layers are unavailable for this selection.'
+    : eligible.length < candidates.length ? 'Partial coverage. Included provinces: ' + eligible.map(p => p.name).join(', ') : '';
+  $('run').disabled = eligible.length === 0 || Boolean(current);
 }
+
+function resetArea(id, text) {
+  $(id).replaceChildren();
+  option($(id), '', text);
+  $(id).disabled = true;
+}
+
+function selection() {
+  return Object.fromEntries(['region','province','municipality','barangay'].map(key => [key, $(key).value || null]));
+}
+
+let areaRequest = 0;
+let previewRequest = 0;
+let previewLayer;
+async function previewBoundary() {
+  const serial = ++previewRequest;
+  const area = selection();
+  if (previewLayer) previewLayer.remove();
+  if (!map || !area.region) return;
+  $('map-title').textContent = ['barangay','municipality','province','region'].map(key =>
+    area[key] ? $(key).selectedOptions[0]?.textContent : null).filter(Boolean).join(' · ');
+  try {
+    const query = new URLSearchParams(Object.entries(area).filter(([, id]) => id));
+    const shape = await fetchData('/api/boundary?' + query);
+    if (serial !== previewRequest || current) return;
+    overlays.forEach(layer => layer.remove());
+    overlays = [];
+    previewLayer = L.geoJSON(shape, {style:{color:'#e9f89c',weight:2,fillOpacity:0}}).addTo(map);
+    if (previewLayer.getBounds().isValid()) map.fitBounds(previewLayer.getBounds(), {padding:[18,18],maxZoom:17});
+  } catch (error) {
+    if (serial === previewRequest && !current) $('availability').textContent = error.message;
+  }
+}
+
 $('region').onchange = () => {
-  $('province').replaceChildren();
-  option($('province'), '', 'Choose a province');
+  areaRequest++;
+  resetArea('province', 'Entire region');
+  resetArea('municipality', 'Entire province');
+  resetArea('barangay', 'Entire municipality or city');
   const items = provinces.filter(p => p.region === $('region').value);
   $('province').disabled = items.length === 0;
   items.forEach(row => option($('province'), row.id, row.name));
   updateAvailability();
+  previewBoundary();
 };
-$('province').onchange = $('mode').onchange = updateAvailability;
+
+async function loadChildren(id, path) {
+  const serial = ++areaRequest;
+  if (!path) return;
+  try {
+    const rows = await fetchData(path);
+    if (serial !== areaRequest) return;
+    for (const row of rows) option($(id), row.id, row.name);
+    $(id).disabled = rows.length === 0;
+  } catch (error) {
+    if (serial === areaRequest) $('availability').textContent = error.message;
+  }
+}
+
+$('province').onchange = () => {
+  resetArea('municipality', 'Entire province');
+  resetArea('barangay', 'Entire municipality or city');
+  const {province} = selection();
+  updateAvailability();
+  previewBoundary();
+  loadChildren('municipality', province && '/api/areas/' + encodeURIComponent(province) + '/municipalities');
+};
+$('municipality').onchange = () => {
+  resetArea('barangay', 'Entire municipality or city');
+  const {province, municipality} = selection();
+  updateAvailability();
+  previewBoundary();
+  loadChildren('barangay', municipality && '/api/areas/' + encodeURIComponent(province)
+    + '/municipalities/' + encodeURIComponent(municipality) + '/barangays');
+};
+$('barangay').onchange = previewBoundary;
+$('mode').onchange = updateAvailability;
 async function init() {
   if (window.L) {
     map = L.map('map').setView([12.55, 122.5], 5);
-    L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
-      attribution: '© <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>'
+    L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', {
+      maxZoom: 19, attribution: 'Tiles © Esri — Maxar, Earthstar Geographics, and the GIS User Community'
     }).addTo(map);
     L.control.scale({imperial: false}).addTo(map);
   }
@@ -78,14 +148,14 @@ async function init() {
 }
 function renderStats(result, id) {
   $('results').hidden = false;
-  $('map-title').textContent = result.province + ' · ' + result.region;
-  $('badge').textContent = result.mode.toUpperCase();
+  $('map-title').textContent = result.area;
+  $('badge').textContent = result.level.toUpperCase() + ' · SATELLITE';
   $('result-note').textContent = Object.keys(result.stats).length
-    ? 'Hectares calculated from the mapped crop polygons within the province.'
+    ? (result.missing_provinces?.length ? 'Partial coverage. Excluded: ' + result.missing_provinces.join(', ') : 'Hectares calculated within the selected boundary.')
     : 'No confirmed crop polygons matched the selection. See the QA report for unmapped source labels.';
   const rows = Object.entries(result.stats).sort((a, b) => b[1]['Total mapped'] - a[1]['Total mapped']);
   const fields = [...new Set(['Total mapped', ...rows.flatMap(([, values]) => Object.keys(values))])];
-  const totals = Object.fromEntries(fields.map(field => [field, rows.reduce((sum, [, r]) => sum + (r[field] || 0) * (field.endsWith('(%)') && field !== 'Share of provincial SAFDZ (%)' ? r['Total mapped'] / rows.reduce((total, [, crop]) => total + crop['Total mapped'], 0) : 1), 0)]));
+  const totals = Object.fromEntries(fields.map(field => [field, rows.reduce((sum, [, r]) => sum + (r[field] || 0) * (field.endsWith('(%)') && !field.startsWith('Share of ') ? r['Total mapped'] / rows.reduce((total, [, crop]) => total + crop['Total mapped'], 0) : 1), 0)]));
   $('cards').replaceChildren();
   for (const field of ['Total mapped', 'Agricultural NPAAAD', 'Agricultural SAFDZ', 'Missing coverage']) {
     if (!(field in totals)) continue;
@@ -117,9 +187,10 @@ async function renderMap(result, id) {
   if (!map) return;
   const paths = ['boundary.geojson', 'map.geojson'].map(file => '/api/jobs/' + id + '/files/' + file);
   const [boundary, classified] = await Promise.all(paths.map(path => fetchData(path)));
+  if (previewLayer) previewLayer.remove();
   overlays.forEach(layer => layer.remove());
   overlays = [
-    L.geoJSON(boundary, {style: {color: '#143b36', weight: 2, fillOpacity: 0}}).addTo(map),
+    L.geoJSON(boundary, {style: {color: '#fff2bc', weight: 2, fillOpacity: 0}}).addTo(map),
     L.geoJSON(classified, {
       style: f => ({color: result.colors[f.properties.assessment], weight: 1, fillOpacity: .7}),
       onEachFeature: (feature, layer) => layer.bindTooltip(node('span', feature.properties.assessment))
@@ -139,12 +210,15 @@ $('settings').onsubmit = async event => {
   event.preventDefault();
   if (current) return;
   current = 'starting'; updateAvailability();
+  $('settings').classList.add('busy');
+  $('settings').inert = true;
   $('job').hidden = false; $('cancel').hidden = true;
   $('status').textContent = 'Starting assessment…';
   $('job').querySelector('progress').value = 0;
   try {
     const result = await fetchData('/api/jobs', {method:'POST', headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({province:$('province').value,mode:$('mode').value,
+      body:JSON.stringify({...selection(), mode:$('mode').value,
+      output:$('settings').querySelector('input[name=output]:checked').value,
       crops:[...$('crops').querySelectorAll('input[value]:checked')].map(box => box.value)})});
     current = result.id; $('cancel').hidden = false;
     while (true) {
@@ -162,7 +236,7 @@ $('settings').onsubmit = async event => {
   } catch (error) {
     $('status').textContent = error.message;
   } finally {
-    current = null; $('cancel').hidden = true; updateAvailability();
+    current = null; $('settings').inert = false; $('settings').classList.remove('busy'); $('cancel').hidden = true; updateAvailability();
   }
 };
 $('cancel').onclick = async () => {

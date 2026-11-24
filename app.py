@@ -15,7 +15,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 import os
 
-from assessment import CROPS, EXPORTS, assessments
+from assessment import CROPS, EXPORTS, assessments, regional_assessment
 from sources import DataError, Sources
 
 app = FastAPI(title='Provincial Crop-Based Land Use Assessment Map')
@@ -31,7 +31,11 @@ logger = logging.getLogger('pclam')
 
 
 class Request(BaseModel):
-    province: str = Field(min_length=1, max_length=32)
+    region: str | None = Field(default=None, max_length=100)
+    province: str | None = Field(default=None, max_length=32)
+    municipality: str | None = Field(default=None, max_length=32)
+    barangay: str | None = Field(default=None, max_length=32)
+    output: Literal['jpeg', 'shp', 'table'] | None = None
     mode: Literal['npaaad', 'safdz', 'combined']
     crops: list[str] = Field(default_factory=list, max_length=len(CROPS))
 
@@ -62,6 +66,70 @@ def catalog():
     ], 'crops': CROPS}
 
 
+
+def selected_area(province, municipality=None, barangay=None):
+    if province not in sources.catalog:
+        raise HTTPException(404, 'Province not found.')
+    row = dict(sources.catalog[province], level='Province')
+    if barangay and not municipality:
+        raise HTTPException(422, 'Select the parent municipality.')
+    if municipality:
+        match = next((m for m in sources.municipal_options(province) if m['id'] == municipality), None)
+        if not match:
+            raise HTTPException(404, 'Municipality not found in this province.')
+        row.update(municipality=municipality, municipality_name=match['name'],
+                   area=f"{match['name']}, {row['name']}", level='Municipality')
+    if barangay:
+        match = next((b for b in sources.barangay_options(municipality) if b['id'] == barangay), None)
+        if not match:
+            raise HTTPException(404, 'Barangay not found in this municipality.')
+        row.update(barangay=barangay, barangay_name=match['name'],
+                   area=f"{match['name']}, {row['area']}", level='Barangay')
+    return row
+
+
+@app.get('/api/areas/{province}/municipalities')
+def municipalities(province: str):
+    selected_area(province)
+    return sources.municipal_options(province)
+
+
+@app.get('/api/areas/{province}/municipalities/{municipality}/barangays')
+def barangays(province: str, municipality: str):
+    selected_area(province, municipality)
+    return sources.barangay_options(municipality)
+
+
+@app.get('/api/boundary')
+def boundary(region: str, province: str | None = None, municipality: str | None = None,
+             barangay: str | None = None):
+    import geopandas as gpd
+    from assessment import CRS_AREA, geom_polygon
+    from fastapi.responses import Response
+
+    catalog()
+    if province:
+        row = selected_area(province, municipality, barangay)
+        if row['region'] != region:
+            raise HTTPException(422, 'The selected province does not belong to this region.')
+        frame = sources.boundary(row)
+    else:
+        rows = [row for row in sources.catalog.values() if row['region'] == region]
+        if not rows or municipality or barangay:
+            raise HTTPException(404, 'Area not found.')
+        frame = gpd.GeoDataFrame(geometry=[
+            sources.province(row['id']).to_crs(CRS_AREA).geometry.map(geom_polygon).union_all().simplify(80, preserve_topology=True)
+            for row in rows
+        ], crs=CRS_AREA)
+    if frame.empty:
+        raise HTTPException(404, 'Boundary unavailable.')
+    tolerance = 3 if barangay else 12 if municipality else 45 if province else 80
+    shape = frame.to_crs(CRS_AREA).geometry.map(geom_polygon).union_all().simplify(tolerance, preserve_topology=True)
+    view = gpd.GeoDataFrame(geometry=[shape], crs=CRS_AREA).to_crs('EPSG:4326')
+    return Response(view.to_json(drop_id=True), media_type='application/geo+json',
+                    headers={'Cache-Control': 'public, max-age=300'})
+
+
 def run(job, request, row):
     def check():
         if job['cancel'].is_set():
@@ -74,7 +142,11 @@ def run(job, request, row):
     try:
         progress(1, 'Starting assessment')
         job['state']['status'] = 'running'
-        result = assessments(sources, row, request.mode, set(request.crops), job['folder'], progress, check)
+        args = (request.mode, set(request.crops), job['folder'], progress, check, request.output)
+        if row.get('level') == 'Region':
+            result = regional_assessment(sources, row['rows'], row['name'], *args)
+        else:
+            result = assessments(sources, row, *args)
         check()
         check_status = {'progress': 100, 'stage': 'Assessment ready', 'status': 'complete', 'result': result}
         job['state'].update(check_status)
@@ -94,12 +166,20 @@ def start(request: Request):
     if not set(request.crops).issubset(CROPS):
         raise HTTPException(422, 'Unknown crop classification.')
     catalog()
-    row = sources.catalog.get(request.province)
-    if not row:
-        raise HTTPException(404, 'Province not found.')
     required = {'npaaad', 'safdz'} if request.mode == 'combined' else {request.mode}
-    if not row['land'] or not required.issubset(row['zones']):
-        raise HTTPException(422, 'Required GIS layers are missing for this selection.')
+    if request.province:
+        row = selected_area(request.province, request.municipality, request.barangay)
+        if request.region and request.region != row['region']:
+            raise HTTPException(422, 'The selected province does not belong to this region.')
+        if not row['land'] or not required.issubset(row['zones']):
+            raise HTTPException(422, 'Required GIS layers are missing for this selection.')
+    else:
+        if not request.region or request.municipality or request.barangay:
+            raise HTTPException(422, 'Select a region and its parent areas as needed.')
+        rows = [item for item in sources.catalog.values() if item['region'] == request.region]
+        if not any(item['land'] and required.issubset(item['zones']) for item in rows):
+            raise HTTPException(422, 'Required GIS layers are missing for this region.')
+        row = {'id': request.region, 'name': request.region, 'level': 'Region', 'rows': rows}
     with job_lock:
         now = time.monotonic()
         for key, old in list(jobs.items()):
@@ -149,8 +229,9 @@ def file(job_id: str, format: str):
     if format not in EXPORTS or not path.is_file():
         raise HTTPException(404, 'This file is unavailable for the assessment.')
     result = job['state']['result']
-    province = result['province'].lower().replace(' ', '-')
-    return FileResponse(path, filename=f"pclam-{province}-{result['mode']}-{job_id[:8]}.{format}")
+    import re
+    slug = re.sub(r'[^a-z0-9]+', '-', result['area'].lower()).strip('-')
+    return FileResponse(path, filename=f"pclam-{slug}-{result['mode']}-{job_id[:8]}.{format}")
 
 
 app.mount('/', StaticFiles(directory=Path(__file__).with_name('web'), html=True), name='web')

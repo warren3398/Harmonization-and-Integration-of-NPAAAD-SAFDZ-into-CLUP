@@ -185,3 +185,53 @@ class Sources:
                     yield dst
                 finally:
                     dst.unlink(missing_ok=True)
+
+    @cached_property
+    def municipalities(self):
+        return pyogrio.read_dataframe(self.file(ADMIN, 'boundaries/municipalities.gpkg'),
+                                      columns=['GID_2', 'NAME_1', 'NAME_2'], read_geometry=False)
+
+    @cached_property
+    def barangays(self):
+        return pyogrio.read_dataframe(self.file(ADMIN, 'boundaries/barangays.gpkg'),
+                                      columns=['GID_3', 'GID_2', 'NAME_3'], read_geometry=False)
+
+    def municipal_options(self, province):
+        name = canonical(self.catalog[province]['name'])
+        name = {'cotabatonorthcotabato': 'northcotabato', 'samarwesternsamar': 'samar',
+                'davaodeorocompostelavalley': 'compostelavalley', 'dinagatislands': 'dinagatislands',
+                'maguindanaodelnorte': 'maguindanao', 'maguindanaodelsur': 'maguindanao'}.get(name, name)
+        candidates = self.municipalities
+        names = candidates.NAME_1.map(canonical)
+        aliases = {'northcotabato': {'cotabato', 'northcotabato'}, 'samar': {'samar', 'westernsamar'},
+                   'compostelavalley': {'compostelavalley', 'davaodeoro'}, 'dinagatislands': {'dinagatisland', 'dinagatislands'}}
+        matches = candidates[names.isin(aliases.get(name, {name}))]
+        if matches.empty or name == 'maguindanao':
+            province_bounds = self.province(province).to_crs('EPSG:4326')
+            boundary = province_bounds.geometry.make_valid().union_all()
+            source = self.file(ADMIN, 'boundaries/municipalities.gpkg')
+            bbox = tuple(province_bounds.to_crs(pyogrio.read_info(source)['crs']).total_bounds)
+            candidates = pyogrio.read_dataframe(source, columns=['GID_2', 'NAME_2'], bbox=bbox)
+            if not candidates.empty:
+                candidates = candidates.to_crs('EPSG:4326')
+                matches = candidates[candidates.geometry.representative_point().covered_by(boundary)]
+        return sorted([{'id': row.GID_2, 'name': row.NAME_2} for row in matches.itertuples()],
+                      key=lambda row: row['name'])
+
+    def barangay_options(self, municipality):
+        matches = self.barangays[self.barangays.GID_2 == municipality]
+        return sorted([{'id': row.GID_3, 'name': row.NAME_3} for row in matches.itertuples()],
+                      key=lambda row: row['name'])
+
+    def boundary(self, row):
+        if not row.get('municipality'):
+            return self.province(row['id'])
+        level, field, key = ('barangays', 'GID_3', row['barangay']) if row.get('barangay') else (
+            'municipalities', 'GID_2', row['municipality'])
+        key = key.replace("'", "''")
+        frame = pyogrio.read_dataframe(self.file(ADMIN, f'boundaries/{level}.gpkg'), where=f"{field} = '{key}'")
+        if frame.empty:
+            raise DataError('The selected local boundary is unavailable.')
+        parent = self.province(row['id']).to_crs(frame.crs).geometry.make_valid().union_all()
+        frame.geometry = frame.geometry.make_valid().intersection(parent)
+        return frame[~frame.geometry.is_empty]

@@ -4,7 +4,7 @@ import os
 import re
 from collections import defaultdict
 from functools import lru_cache
-from math import floor
+from math import cos, floor, log10, radians
 from pathlib import Path
 
 import geopandas as gpd
@@ -30,7 +30,7 @@ CROP_MAP = {canonical(name): name for name in CROPS}
 CROP_MAP.update({'mixedvegetables': 'Vegetables', 'diversifiedcrop': 'Diversified Crops', 'abacca': 'Abaca', 'maize': 'Corn', 'sugarcaneplantation': 'Sugarcane', 'coconutplantation': 'Coconut',
                  'palay': 'Rice', 'ricelandirrigated': 'Irrigated Rice', 'ricelandrainfed': 'Rainfed Rice'})
 NON_CROP = {'buildup', 'builtup', 'forest', 'grassland', 'shrubland', 'water', 'fishpond', 'mangrove'}
-EXPORTS = {'csv', 'xlsx', 'pdf', 'geojson', 'gpkg', 'shp.zip', 'map.png', 'map.pdf', 'qa.json'}
+EXPORTS = {'csv', 'xlsx', 'pdf', 'geojson', 'gpkg', 'shp.zip', 'map.png', 'map.jpg', 'map.pdf', 'qa.json'}
 
 
 def crop_name(raw, aliases):
@@ -154,7 +154,7 @@ def class_name(np, sa, mode):
     return 'Outside both'
 
 
-def assessments(sources, row, mode, selected, out, progress, check):
+def assessments(sources, row, mode, selected, out, progress, check, output=None, intermediate=False):
     required = ('npaaad', 'safdz') if mode == 'combined' else (mode,)
     missing = [role.upper() for role in required if role not in row['zones']]
     if missing or not row['land']:
@@ -165,7 +165,7 @@ def assessments(sources, row, mode, selected, out, progress, check):
     qa = {'repaired_geometries': 0, 'source_overlap_ha': {}, 'land_overlap_ha': 0.,
           'unmapped_land_classes_ha': {}, 'slivers_under_1m2': 0, 'land_objects': [], 'zone_objects': {}}
     progress(3, 'Reading provincial boundary')
-    province = sources.province(row['id']).to_crs(CRS_AREA)
+    province = (sources.boundary(row) if row.get('municipality') else sources.province(row['id'])).to_crs(CRS_AREA)
     province.geometry = province.geometry.map(geom_polygon)
     boundary = province.geometry.union_all()
     if boundary.is_empty:
@@ -251,7 +251,8 @@ def assessments(sources, row, mode, selected, out, progress, check):
                             if sa in VALID['safdz'] - SA: s['Outside agricultural SAFDZ'] += area
                             if area < .0001: qa['slivers_under_1m2'] += 1
                             pending.append({'region': row['region'], 'province': row['name'], 'psgc': row['id'],
-                                            'municipality': attrs.get('Mun_Name'), 'lu_original': raw,
+                                            'municipality': row.get('municipality_name') or attrs.get('Mun_Name'),
+                                            'barangay': row.get('barangay_name'), 'lu_original': raw,
                                             'lu_code': str(attrs.get('LU_CODE', attrs.get('LANDUSE_CODE', ''))),
                                             'source_fid': str(attrs.get('ORIG_FID', '')), 'crop_name': crop,
                                             'npaaad_code': np, 'safdz_code': sa, 'assessment': category,
@@ -262,8 +263,9 @@ def assessments(sources, row, mode, selected, out, progress, check):
     if not export_path.exists():
         frame = gpd.GeoDataFrame({'crop_name': [], 'assessment': [], 'area_ha': []}, geometry=[], crs=CRS_AREA)
         pyogrio.write_dataframe(frame, export_path, layer='assessment', geometry_type='MultiPolygon')
-    progress(90, 'Writing maps and statistical reports')
-    qa['province_area_ha'] = boundary.area / 10000
+    progress(87, 'Calculating area of the protection layers')
+    qa['assessment_area_ha'] = boundary.area / 10000
+    qa['province_area_ha'] = qa['assessment_area_ha']
     for tile, cell in cells(boundary):
         if tile not in measured:
             check()
@@ -282,11 +284,15 @@ def assessments(sources, row, mode, selected, out, progress, check):
             totals['Outside both (%)'] = 100 * totals.get('Outside both', 0) / totals['Total mapped']
         safdz_ha = qa['agricultural_zone_area_ha'].get('safdz', 0)
         if safdz_ha:
-            totals['Share of provincial SAFDZ (%)'] = 100 * totals.get('Agricultural SAFDZ', 0) / safdz_ha
+            totals['Share of assessed SAFDZ (%)' if row.get('municipality') else 'Share of provincial SAFDZ (%)'] = 100 * totals.get('Agricultural SAFDZ', 0) / safdz_ha
     bounds = list(province.to_crs('EPSG:4326').total_bounds)
     result = {'province': row['name'], 'region': row['region'], 'mode': mode, 'bounds': bounds,
-              'stats': stats, 'qa': qa, 'features': len(frame), 'colors': COLORS}
-    write_products(out, result, frame, province)
+              'stats': stats, 'qa': qa, 'features': len(frame), 'colors': COLORS,
+              'area': row.get('area', row['name']), 'level': row.get('level', 'Province')}
+    if intermediate:
+        return result
+    progress(95, 'Preparing selected output')
+    write_products(out, result, frame, province, output)
     return result
 
 
@@ -298,7 +304,7 @@ def flush(pending, path):
         pending.clear()
 
 
-def write_products(out, result, frame, province):
+def write_products(out, result, frame, province, output=None):
     import csv
     from openpyxl import Workbook
     from PIL import Image, ImageDraw
@@ -317,78 +323,118 @@ def write_products(out, result, frame, province):
         totals = [sum(row[i] for row in matrix[1:]) for i in range(1, len(fields) + 1)]
         weights = [row[1] for row in matrix[1:]]
         for i, key in enumerate(fields):
-            if key.endswith('(%)') and key != 'Share of provincial SAFDZ (%)' and weights and sum(weights):
+            if key.endswith('(%)') and not key.startswith('Share of ') and weights and sum(weights):
                 totals[i] = sum(row[i + 1] * row[1] for row in matrix[1:]) / sum(weights)
         matrix.append(['Total', *[round(value, 6) for value in totals]])
-    with (out / 'assessment.csv').open('w', newline='', encoding='utf-8-sig') as file:
-        csv.writer(file).writerows(matrix)
-    workbook = Workbook()
-    sheet = workbook.active
-    sheet.title = 'Crop assessment'
-    for line in matrix:
-        sheet.append(line)
-    sheet.freeze_panes = 'B2'
-    sheet.auto_filter.ref = sheet.dimensions
-    workbook.save(out / 'assessment.xlsx')
-    if len(frame):
+    if output in (None, 'table'):
+        with (out / 'assessment.csv').open('w', newline='', encoding='utf-8-sig') as file:
+            csv.writer(file).writerows(matrix)
+        workbook = Workbook()
+        sheet = workbook.active
+        sheet.title = 'Crop assessment'
+        for line in matrix:
+            sheet.append(line)
+        sheet.freeze_panes = 'B2'
+        sheet.auto_filter.ref = sheet.dimensions
+        profile = workbook.create_sheet('Coverage')
+        profile.append(['Assessment area', result['area']])
+        profile.append(['Geographic level', result['level']])
+        for name in result.get('missing_provinces', []):
+            profile.append(['Excluded province', name])
+        workbook.save(out / 'assessment.xlsx')
+    if output == 'shp' or (output is None and len(frame)):
         with tempfile_directory(out) as directory:
             path = Path(directory)
             labels = dict(zip(frame.columns, frame.columns))
             labels.update({'municipality': 'municipal', 'npaaad_code': 'np_code',
                            'safdz_code': 'sa_code', 'data_year': 'year', 'lu_original': 'lu_orig'})
-            pyogrio.write_dataframe(frame.rename(columns=labels), path / 'assessment.shp', encoding='UTF-8')
-            (path / 'fields.txt').write_text('Shapefile field names and GeoPackage equivalents\n' +
+            pyogrio.write_dataframe(frame.rename(columns=labels), path / 'assessment.shp', encoding='UTF-8', geometry_type='MultiPolygon', promote_to_multi=True)
+            coverage = f"{result['level']}: {result['area']}\n"
+            if result.get('missing_provinces'):
+                coverage += 'Excluded provinces: ' + ', '.join(result['missing_provinces']) + '\n'
+            (path / 'fields.txt').write_text(coverage + 'Shapefile field names and GeoPackage equivalents\n' +
                                               '\n'.join(f'{value} = {key}' for key, value in labels.items()))
             shutil_make_zip(out / 'assessment.shp.zip', path)
     view = frame.copy()
-    view.geometry = view.geometry.simplify(12, preserve_topology=True)
+    view.geometry = view.geometry.simplify(2 if result['level'] == 'Barangay' else 12, preserve_topology=True)
     if len(view):
         view = view.dissolve(by='assessment', as_index=False)
         view = view[['assessment', 'geometry']]
     boundary_geojson = province[['geometry']].to_crs('EPSG:4326').to_json(drop_id=True)
     (out / 'boundary.geojson').write_text(boundary_geojson)
     (out / 'map.geojson').write_text(view.to_crs('EPSG:4326').to_json(drop_id=True))
-    if len(frame) <= 15000:
+    if output is None and len(frame) <= 15000:
         frame.to_crs('EPSG:4326').to_file(out / 'assessment.geojson', driver='GeoJSON', engine='pyogrio')
         if (out / 'assessment.geojson').stat().st_size > 30_000_000:
             (out / 'assessment.geojson').unlink()
-    width, height = 1560, 1100
-    image = Image.new('RGB', (width, height), '#e1eee9')
-    draw = ImageDraw.Draw(image)
-    xmin, ymin, xmax, ymax = province.total_bounds
-    scale = min((width - 520) / (xmax - xmin), (height - 180) / (ymax - ymin))
-    def xy(coords):
-        return [(65 + (x - xmin) * scale, height - 75 - (y - ymin) * scale) for x, y, *_ in coords]
-
-    def paint(geometry, fill, draw_on, outline=None):
-        for poly in sh.get_parts(geometry):
-            draw_on.polygon(xy(poly.exterior.coords), fill=fill, outline=outline)
-            for hole in poly.interiors:
-                draw_on.polygon(xy(hole.coords), fill=0 if isinstance(fill, int) else '#e1eee9')
-
-    paint(province.geometry.union_all(), '#f5f5e8', draw, '#496158')
-    active = []
-    for feature in view.itertuples():
-        mask = Image.new('1', image.size)
-        paint(feature.geometry, 1, ImageDraw.Draw(mask))
-        image.paste(COLORS[feature.assessment], mask=mask)
-        active.append(feature.assessment)
-    draw.text((52, 39), f"{result['province']} | Provincial Crop-Based Land Use Assessment Map",
-              fill='#14392f', font_size=27)
-    draw.text((52, 76), 'Land Use 2020–2022 | Equal-area analysis · EPSG:6933', fill='#30594c', font_size=16)
-    draw.text((1160, 180), 'ASSESSMENT CLASSES', fill='#14392f', font_size=21)
-    for index, label in enumerate(active):
-        y = 225 + index * 38
-        draw.rectangle((1160, y, 1180, y + 20), fill=COLORS[label])
-        draw.text((1190, y), label, fill='#14392f', font_size=17)
-    bar_km = max(1, round(140 / scale / 1000))
-    bar_px = bar_km * 1000 * scale
-    draw.line((1160, 515, 1160 + bar_px, 515), fill='#14392f', width=4)
-    draw.text((1160, 526), f'{bar_km} km (projected grid)', fill='#14392f', font_size=16)
-    image.save(out / 'assessment.map.png')
-    image.save(out / 'assessment.map.pdf', resolution=150)
+    if output in (None, 'jpeg'):
+        map_crs = 'EPSG:3857' if output == 'jpeg' else CRS_AREA
+        map_area = province.to_crs(map_crs)
+        map_view = view.to_crs(map_crs)
+        width, height = 1560, 1100
+        image = Image.new('RGB', (width, height), '#e1eee9')
+        draw = ImageDraw.Draw(image)
+        xmin, ymin, xmax, ymax = map_area.total_bounds
+        scale = min((width - 520) / (xmax - xmin), (height - 180) / (ymax - ymin))
+        satellite = False
+        if output == 'jpeg':
+            # Match the Esri image footprint to the exact map pixel rectangle.
+            satellite = add_satellite_background(image, xmin, ymin, scale)
+        def xy(coords):
+            return [(65 + (x - xmin) * scale, height - 75 - (y - ymin) * scale) for x, y, *_ in coords]
+    
+        def paint(geometry, fill, draw_on, outline=None):
+            for poly in sh.get_parts(geom_polygon(geometry)):
+                draw_on.polygon(xy(poly.exterior.coords), fill=fill, outline=outline)
+                for hole in poly.interiors:
+                    draw_on.polygon(xy(hole.coords), fill=0 if isinstance(fill, int) else '#e1eee9')
+    
+        land = map_area.geometry.union_all()
+        if satellite:
+            for part in sh.get_parts(geom_polygon(land)):
+                draw.line(xy(part.exterior.coords), fill='#fff0b0', width=3)
+        else:
+            paint(land, '#f5f5e8', draw, '#496158')
+        active = []
+        for feature in map_view.itertuples():
+            mask = Image.new('1', image.size)
+            paint(feature.geometry, 1, ImageDraw.Draw(mask))
+            if satellite:
+                image.paste(COLORS[feature.assessment], mask=mask.convert('L').point([0] * 255 + [158]))
+            else:
+                image.paste(COLORS[feature.assessment], mask=mask)
+            active.append(feature.assessment)
+        draw.text((52, 39), f"{result['area']} | Provincial Crop-Based Land Use Assessment Map",
+                  fill='#14392f', font_size=27)
+        draw.text((52, 76), 'Land Use 2020–2022 | Equal-area analysis · EPSG:6933', fill='#30594c', font_size=16)
+        draw.text((1160, 180), 'ASSESSMENT CLASSES', fill='#14392f', font_size=21)
+        for index, label in enumerate(active):
+            y = 225 + index * 38
+            draw.rectangle((1160, y, 1180, y + 20), fill=COLORS[label])
+            draw.text((1190, y), label, fill='#14392f', font_size=17)
+        latitude = (result['bounds'][1] + result['bounds'][3]) / 2
+        ratio = cos(radians(latitude)) if output == 'jpeg' else 1
+        bar_m = max(1, round(140 * ratio / scale, -int(log10(max(140 * ratio / scale, 1)))))
+        bar_px = bar_m * scale / ratio
+        bar_label = f'{bar_m / 1000:g} km' if bar_m >= 1000 else f'{bar_m:g} m'
+        draw.line((1160, 515, 1160 + bar_px, 515), fill='#14392f', width=4)
+        draw.text((1160, 526), f'{bar_label} (approx.)', fill='#14392f', font_size=16)
+        if result.get('missing_provinces'):
+            draw.text((1160, 565), 'Partial regional coverage', fill='#8d351f', font_size=20)
+        if output == 'jpeg':
+            source = ('Imagery: Esri, Maxar, Earthstar Geographics and the GIS User Community'
+                      if satellite else 'Satellite imagery unavailable at export time')
+            draw.text((65, height - 38), source, fill='#14392f', font_size=14)
+            image.save(out / 'assessment.map.jpg', quality=95, subsampling=0, dpi=(180, 180))
+        else:
+            image.save(out / 'assessment.map.png')
+            image.save(out / 'assessment.map.pdf', resolution=150)
+    if output is not None:
+        choices = {'jpeg': ['map.jpg'], 'shp': ['shp.zip'], 'table': ['xlsx', 'csv']}
+        result['exports'] = choices[output]
+        return
     styles = getSampleStyleSheet()
-    title = escape(result['province']) + ' Crop-Based Land Use Assessment'
+    title = escape(result['area']) + ' Crop-Based Land Use Assessment'
     total = sum(r['Total mapped'] for r in result['stats'].values())
     lead = max(result['stats'], key=lambda k: result['stats'][k]['Total mapped'], default=None)
     summary = f'The selected classification covers {total:,.2f} hectares of mapped crop area.'
@@ -434,3 +480,93 @@ def shutil_make_zip(output, folder):
     with ZipFile(output, 'w', compression=ZIP_DEFLATED) as archive:
         for file in folder.iterdir():
             archive.write(file, file.name)
+
+
+def regional_assessment(sources, rows, region, mode, selected, out, progress, check, output):
+    areas = []
+    stats = defaultdict(lambda: defaultdict(float))
+    zones = defaultdict(float)
+    summaries = []
+    required = {'npaaad', 'safdz'} if mode == 'combined' else {mode}
+    eligible = [row for row in rows if row['land'] and required.issubset(row['zones'])]
+    missing = [row['name'] for row in rows if row not in eligible]
+    if not eligible:
+        raise DataError('Required GIS layers are missing for this region.')
+    target = out / 'assessment.gpkg'
+    for index, row in enumerate(eligible):
+        check()
+        def stage(value, message):
+            progress(int(92 * (index + value / 100) / len(eligible)),
+                     f"{row['name']} ({index + 1}/{len(eligible)}) · {message}")
+
+        with tempfile_directory(out) as temp:
+            folder = Path(temp)
+            result = assessments(sources, row, mode, selected, folder, stage, check, output, intermediate=True)
+            if result['features']:
+                frame = pyogrio.read_dataframe(folder / 'assessment.gpkg')
+                pyogrio.write_dataframe(frame, target, layer='assessment', append=target.exists(),
+                                        geometry_type='MultiPolygon', promote_to_multi=True)
+        areas.append(sources.province(row['id']).to_crs(CRS_AREA).geometry.map(geom_polygon).union_all())
+        summaries.append({'province': row['name'], **result['qa']})
+        for key, value in result['qa']['agricultural_zone_area_ha'].items():
+            zones[key] += value
+        for crop, values in result['stats'].items():
+            for key, value in values.items():
+                if not key.endswith('(%)'):
+                    stats[crop][key] += value
+                elif not key.startswith('Share of '):
+                    stats[crop][key] += value * values['Total mapped']
+
+    for values in stats.values():
+        for key in list(values):
+            if key.endswith('(%)'):
+                values[key] /= values['Total mapped']
+        if zones['safdz']:
+            values['Share of assessed SAFDZ (%)'] = 100 * values.get('Agricultural SAFDZ', 0) / zones['safdz']
+
+    coverage = gpd.GeoDataFrame(geometry=[sh.union_all(areas)], crs=CRS_AREA)
+    outline = gpd.GeoDataFrame(geometry=[sh.union_all([
+        sources.province(row['id']).to_crs(CRS_AREA).geometry.map(geom_polygon).union_all()
+        for row in rows
+    ])], crs=CRS_AREA) if missing else coverage
+    frame = pyogrio.read_dataframe(target) if target.exists() else gpd.GeoDataFrame(
+        {'crop_name': [], 'assessment': [], 'area_ha': []}, geometry=[], crs=CRS_AREA)
+    if not target.exists():
+        pyogrio.write_dataframe(frame, target, layer='assessment', geometry_type='MultiPolygon')
+    qa = {'assessment_area_ha': coverage.area.iloc[0] / 10000, 'missing_provinces': missing,
+          'province_results': summaries, 'agricultural_zone_area_ha': dict(zones),
+          'province_area_ha': coverage.area.iloc[0] / 10000,
+          'repaired_geometries': sum(i['repaired_geometries'] for i in summaries),
+          'slivers_under_1m2': sum(i['slivers_under_1m2'] for i in summaries),
+          'area_reconciliation_ha': sum(i['area_reconciliation_ha'] for i in summaries)}
+    result = {'province': region, 'region': region, 'area': region, 'level': 'Region',
+              'mode': mode, 'stats': stats, 'qa': qa, 'missing_provinces': missing,
+              'bounds': list(outline.to_crs('EPSG:4326').total_bounds), 'features': len(frame), 'colors': COLORS}
+    progress(95, 'Preparing selected output')
+    write_products(out, result, frame, outline, output)
+    return result
+
+
+def add_satellite_background(image, xmin, ymin, scale):
+    from io import BytesIO
+    from urllib.error import URLError
+    from urllib.parse import urlencode
+    from urllib.request import urlopen
+    from PIL import Image
+
+    left, top, right, bottom = 52, 109, 1125, image.height - 63
+    width, height = right - left, bottom - top
+    origin = image.height - 75
+    bounds = (xmin + (left - 65) / scale, ymin + (origin - bottom) / scale,
+              xmin + (right - 65) / scale, ymin + (origin - top) / scale)
+    params = urlencode({'bbox': ','.join(map(str, bounds)), 'bboxSR': 3857, 'imageSR': 3857,
+                        'size': f'{width},{height}', 'format': 'jpg', 'f': 'image'})
+    try:
+        url = 'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/export?' + params
+        with urlopen(url, timeout=7) as response:
+            data = response.read(5_000_000)
+        with Image.open(BytesIO(data)) as imagery:
+            image.paste(imagery.convert('RGB').resize((width, height)), (left, top))
+        return True
+    except (URLError, OSError, ValueError):
+        return False
