@@ -301,13 +301,24 @@ function renderStats(result, id) {
       scroll.className = 'matrix';
       const table = node('table', undefined, scroll);
       const thead = node('thead', undefined, table);
-      const descriptions = node('tr', undefined, thead);
-      ['', ...sheet.labels].forEach(label => node('th', label, descriptions));
       const codes = node('tr', undefined, thead);
       ['Crops', ...sheet.columns].forEach(code => node('th', code, codes).scope = 'col');
       const body = node('tbody', undefined, table);
       sheet.rows.forEach(row => renderZoneRow(body, row));
       renderZoneRow(node('tfoot', undefined, table), sheet.total);
+      if (sheet.labels.some(Boolean)) {
+        const legend = node('details', undefined, section);
+        legend.className = 'zone-legend';
+        node('summary', 'Zone legend', legend);
+        const definitions = node('dl', undefined, legend);
+        sheet.columns.forEach((code, index) => {
+          const description = sheet.labels[index];
+          if (!description) return;
+          const entry = node('div', undefined, definitions);
+          node('dt', code, entry);
+          node('dd', description, entry);
+        });
+      }
     }
     if (result.zone_tables.length > 1) {
       node('p', 'Each table summarizes the same crop polygons by a different zoning layer. Adding the totals would count some areas twice.', matrix).className = 'matrix-note';

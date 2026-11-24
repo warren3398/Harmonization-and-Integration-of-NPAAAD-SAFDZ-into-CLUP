@@ -27,11 +27,20 @@ footer{padding-top:18px;text-align:center;border-top:1px solid #dce7ea}
 @media(max-width:900px){.workspace{grid-template-columns:1fr}.hero-inner{max-width:82%}#map{height:460px}}
 @media(max-width:550px){.hero{min-height:0;padding:20px 16px 95px;align-items:flex-start}.hero::before{inset:48px 0 0;background:linear-gradient(180deg,#092f28 2%,#092f28ce 48%,#092f2840 100%),url(hero.webp) center/cover no-repeat}.hero-inner{max-width:100%}aside{padding:17px}.fields{gap:0 10px}#map{height:390px}}
 
-.zone-matrix h3{padding:16px 20px 7px;font-size:1rem}
-.zone-matrix table{min-width:820px}
-.zone-matrix thead th{position:static;white-space:normal;text-align:center;border-right:1px solid #d6e2dc}
-.zone-matrix thead tr:first-child th{vertical-align:top;min-width:56px}
-.zone-matrix thead tr:first-child th:nth-child(2),.zone-matrix thead tr:first-child th:nth-child(3){min-width:116px}
-.zone-matrix tbody th{position:static;background:white}
-.zone-matrix tfoot{background:#e4f0ea;font-weight:700}
+.zone-matrix{margin:12px 20px;border:1px solid #dce7df;border-radius:10px;overflow:hidden}
+.zone-matrix h3{padding:10px 12px;font-size:.94rem}
+.zone-matrix .matrix{border-block:1px solid #e0eae3}
+.zone-matrix table{width:100%;min-width:max-content;font-size:.8rem}
+.zone-matrix th,.zone-matrix td{padding:5px 8px;border-bottom:1px solid #e7eee8}
+.zone-matrix thead th{position:static;text-align:right;background:#edf5ef}
+.zone-matrix th:first-child{position:sticky;left:0;text-align:left;z-index:1}
+.zone-matrix tbody th{background:white}
+.zone-matrix td{font-variant-numeric:tabular-nums}
+.zone-matrix tfoot th,.zone-matrix tfoot td{background:#e4f0ea;font-weight:700;border-bottom:0}
+.zone-legend{padding:0 12px;font-size:.78rem}
+.zone-legend summary{width:fit-content;min-height:0;padding:7px 0;border:0;background:none;color:var(--green);font-size:inherit;font-weight:700}
+.zone-legend dl{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,240px),1fr));gap:5px 15px;margin:2px 0 10px}
+.zone-legend dl div{display:grid;grid-template-columns:2.6rem 1fr;gap:5px}
+.zone-legend dt{font-weight:700}
+.zone-legend dd{margin:0}
 .matrix-note{padding:0 20px;color:#50675f;font-size:.85rem}
