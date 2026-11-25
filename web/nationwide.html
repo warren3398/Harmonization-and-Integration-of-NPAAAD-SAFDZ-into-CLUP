@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Nationwide Crop Assessment | PCLAM</title>
+<link rel="stylesheet" href="/style.css">
+<script defer src="/nationwide.js"></script>
+</head>
+<body>
+<main class="national-dashboard">
+<a class="local-link" href="/">‹ Provincial assessment map</a>
+<header class="national-header">
+<h1>Nationwide crop assessment</h1>
+<p>See how many hectares of a crop fall within the selected agricultural zones.</p>
+</header>
+<section class="panel national-panel" aria-label="Nationwide crop table">
+<div class="fields">
+<div><label for="national-mode">Assessment type</label><select id="national-mode">
+<option value="npaaad">NPAAAD</option><option value="safdz">SAFDZ</option><option value="combined">Both</option>
+</select></div>
+<div><label for="national-crop">Crop</label><select id="national-crop" disabled>
+<option value="">Loading crops…</option>
+</select></div>
+</div>
+<p id="national-status" role="status">Select a crop to see its area.</p>
+<progress id="national-progress" max="100" value="0" aria-label="Assessment progress" hidden></progress>
+<button type="button" id="national-retry" hidden>Try again</button>
+<div id="national-result" hidden>
+<div class="matrix">
+<table aria-label="Nationwide crop area">
+<thead><tr><th scope="col">Crop</th><th scope="col">Assessment</th><th scope="col">Area within zones (ha)</th></tr></thead>
+<tbody id="national-total"></tbody>
+</table>
+</div>
+<p id="national-coverage"></p>
+<nav id="exports" class="national-downloads" aria-label="Table downloads"></nav>
+</div>
+</section>
+</main>
+<footer>Department of Agriculture · Bureau of Soils and Water Management</footer>
+</body>
+</html>

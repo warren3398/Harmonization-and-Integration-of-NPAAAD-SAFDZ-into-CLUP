@@ -46,3 +46,17 @@ footer{padding-top:18px;text-align:center;border-top:1px solid #dce7ea}
 .matrix-note{padding:0 20px;color:#50675f;font-size:.85rem}
 
 .workspace.table-only,.table-only .output{grid-template-columns:minmax(0,1fr)}
+
+.hero .nationwide-link{display:inline-flex;gap:12px;align-items:center;padding:10px 14px;margin-top:15px;border-radius:8px;background:#e5f2e9;color:#163f32;font-weight:750;text-decoration:none}
+.hero .nationwide-link:hover{background:#fff}
+.national-dashboard{max-width:980px;margin:0 auto;padding:30px 20px 44px}
+.national-header{display:block;padding:0;margin:20px 0 24px;background:none;color:inherit}
+.national-header h1{margin:0 0 8px;font-size:clamp(1.7rem,4vw,2.5rem)}
+.national-header p{margin:0}
+.local-link{color:var(--green);font-weight:700}
+.national-panel{padding:22px}
+.national-panel .fields{grid-template-columns:repeat(2,minmax(0,1fr))}
+.national-panel progress{width:100%}
+#national-status,#national-coverage{margin:14px 0;color:#405851}
+.national-downloads{margin-top:10px}
+@media(max-width:550px){.national-panel .fields{grid-template-columns:1fr}.national-panel{padding:16px}.national-dashboard{padding:22px 14px 36px}}

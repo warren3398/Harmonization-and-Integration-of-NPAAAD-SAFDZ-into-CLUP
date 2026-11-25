@@ -41,6 +41,7 @@ class AreaRequest(BaseModel):
 class Request(AreaRequest):
     output: Literal['jpeg', 'shp', 'table'] | None = None
     focused: bool = False
+    dashboard: bool = False
     mode: Literal['npaaad', 'safdz', 'combined']
     crops: list[str] = Field(default_factory=list, max_length=len(CROPS))
 
@@ -149,7 +150,8 @@ def run(job, request, row):
         job['state']['status'] = 'running'
         args = (request.mode, set(request.crops), job['folder'], progress, check, request.output)
         if row.get('level') in ('Region', 'Nationwide'):
-            result = regional_assessment(sources, row['rows'], row['name'], *args, focused=request.focused)
+            result = regional_assessment(sources, row['rows'], row['name'], *args, focused=request.focused,
+                                         selected_only=request.dashboard)
         else:
             result = assessments(sources, row, *args, focused=request.focused)
         check()
@@ -170,6 +172,10 @@ def run(job, request, row):
 def start(request: Request):
     if not set(request.crops).issubset(CROPS):
         raise HTTPException(422, 'Unknown crop classification.')
+    if request.dashboard and (request.region != 'Nationwide' or request.province or request.municipality
+                              or request.barangay or request.output != 'table' or not request.focused
+                              or len(request.crops) != 1):
+        raise HTTPException(422, 'The Nationwide dashboard requires one crop and a table.')
     catalog()
     required = {'npaaad', 'safdz'} if request.mode == 'combined' else {request.mode}
     if request.province:
@@ -188,7 +194,7 @@ def start(request: Request):
         if not any(item['land'] and required.issubset(item['zones']) for item in rows):
             raise HTTPException(422, 'Required GIS layers are missing for this region.')
         row = {'id': request.region, 'name': request.region, 'level': 'Nationwide' if nationwide else 'Region', 'rows': rows}
-    key = ('nationwide-table', request.mode, tuple(sorted(set(request.crops)))) if row.get('level') == 'Nationwide' else None
+    key = ('nationwide-table', request.mode, tuple(sorted(set(request.crops))), request.dashboard) if row.get('level') == 'Nationwide' else None
     return submit_job(run, request, row, key=key, reuse_pending=False)
 
 

@@ -127,13 +127,16 @@ def source_schema(path, role):
     return layer, info, field
 
 
-def source_batches(path, layer, columns, bbox, batch_size, check, *, index_features=False):
+def source_batches(path, layer, columns, bbox, batch_size, check, *, index_features=False, filter_records=None):
     if index_features:
         # Locate all matches once without allocating geometry in Python. Keep
         # GDAL's match order because the first crop polygon claims overlaps.
         check()
-        ids = pyogrio.read_dataframe(path, layer=layer, columns=[], bbox=bbox,
-                                    read_geometry=False, fid_as_index=True).index.to_numpy()
+        candidates = pyogrio.read_dataframe(path, layer=layer, columns=columns if filter_records else [], bbox=bbox,
+                                           read_geometry=False, fid_as_index=True)
+        if filter_records:
+            candidates = candidates[filter_records(candidates)]
+        ids = candidates.index.to_numpy()
         for start in range(0, len(ids), batch_size):
             check()
             yield pyogrio.read_dataframe(path, layer=layer, columns=columns, force_2d=True,
@@ -178,11 +181,17 @@ def source_rows(path, role, province, qa, check, wanted=None, *, schema=None,
     extra = [f for f in info['fields'] if f != field and f.upper() in {'MUN_NAME', 'ORIG_FID', 'LU_CODE', 'LANDUSE_CODE'}]
     batch_size = 24 if role == 'landuse' else 2
     index_features = prepared and role == 'landuse' and info['driver'] == 'GPKG' and 100 <= info['features'] <= 100_000
+    def filter_records(frame):
+        return [wanted(str(record[field] or '').strip(), land_use_code({name: record[name] for name in extra}))
+                for record in frame[[field, *extra]].to_dict('records')]
+
     for batch in source_batches(path, layer, [field, *extra], bbox, batch_size, check,
-                                index_features=index_features):
-        if wanted is not None:
-            batch = batch[[wanted(str(record[field] or '').strip(), land_use_code({name: record[name] for name in extra}))
-                           for record in batch[[field, *extra]].to_dict('records')]]
+                                index_features=index_features,
+                                filter_records=filter_records if wanted is not None else None):
+        if wanted is not None and not index_features:
+            batch = batch[filter_records(batch)]
+            if batch.empty:
+                continue
         if role != 'landuse':
             batch.geometry = batch.geometry.map(
                 lambda geom: sh.clip_by_rect(geom, *clip_bounds)
@@ -288,7 +297,7 @@ def zone_tables(areas, crops):
                        'rows': rows, 'total': ['Total', *totals]})
     return tables
 
-def assessments(sources, row, mode, selected, out, progress, check, output=None, intermediate=False, focused=False, archive_bounds=None):
+def assessments(sources, row, mode, selected, out, progress, check, output=None, intermediate=False, focused=False, archive_bounds=None, selected_only=False):
     required = ('npaaad', 'safdz') if mode == 'combined' else (mode,)
     missing = [role.upper() for role in required if role not in row['zones']]
     if missing or not row['land']:
@@ -298,6 +307,11 @@ def assessments(sources, row, mode, selected, out, progress, check, output=None,
         raise DataError('A configured crop mapping uses an unsupported standard crop name.')
     qa = {'repaired_geometries': 0, 'source_overlap_ha': {}, 'land_overlap_ha': 0.,
           'unmapped_land_classes_ha': {}, 'source_crop_labels': [], 'land_polygons': 0, 'slivers_under_1m2': 0, 'land_objects': [], 'zone_objects': {}}
+    allowed = selected | RICE_TYPES if 'Rice' in selected else selected
+
+    def wanted(raw, code):
+        return crop_name(raw, aliases, code) in allowed
+
     progress(3, 'Reading provincial boundary')
     province = (sources.boundary(row) if row.get('municipality') else sources.province(row['id'])).to_crs(CRS_AREA)
     province.geometry = province.geometry.map(geom_polygon)
@@ -403,7 +417,8 @@ def assessments(sources, row, mode, selected, out, progress, check, output=None,
             if archive_bounds is not None and extent is not None and not bounds_overlap(extent, bbox):
                 continue
             for raw, geom, attrs in source_rows(path, 'landuse', province, qa, check, schema=schema,
-                                               bbox=bbox, bound=boundary, prepared=regional_table):
+                                               bbox=bbox, bound=boundary, prepared=regional_table,
+                                               wanted=wanted if selected_only else None):
                 qa['land_polygons'] += 1
                 crop = crop_name(raw, aliases, land_use_code(attrs))
                 if not crop:
@@ -412,7 +427,7 @@ def assessments(sources, row, mode, selected, out, progress, check, output=None,
                         unmapped[raw or '(blank)'] = unmapped.get(raw or '(blank)', 0) + geom.area / 10000
                     continue
                 observed_crops.add(crop)
-                if selected and crop not in selected and not ('Rice' in selected and crop in RICE_TYPES):
+                if selected and crop not in allowed:
                     continue
                 for tile, cell in cells(geom):
                     portion = geom if regional_table and cell.covers(geom) else geom_polygon(geom.intersection(cell))
@@ -617,9 +632,12 @@ def write_products(out, result, frame, province, output=None):
         for name in result.get('missing_provinces', []):
             profile.append(['Excluded province', name])
         diagnostics = workbook.create_sheet('Source diagnostics')
-        diagnostics.append(['Intersecting source polygons', qa.get('land_polygons', 0)])
-        diagnostics.append(['Recognized crops in area', ', '.join(qa.get('source_crop_labels', []))])
-        diagnostics.append(['Unconfirmed source label', 'Source polygon area (ha, may overlap)'])
+        polygon_label = 'Intersecting polygons for the selected crop' if qa.get('selected_crop_only') else 'Intersecting source polygons'
+        diagnostics.append([polygon_label, qa.get('land_polygons', 0)])
+        crop_label = 'Recognized crops in filtered scan' if qa.get('selected_crop_only') else 'Recognized crops in area'
+        diagnostics.append([crop_label, ', '.join(qa.get('source_crop_labels', []))])
+        if not qa.get('selected_crop_only'):
+            diagnostics.append(['Unconfirmed source label', 'Source polygon area (ha, may overlap)'])
         for label, area in sorted(qa.get('unmapped_land_classes_ha', {}).items()):
             diagnostics.append([label, round(area, 6)])
             diagnostics.cell(diagnostics.max_row, 1).data_type = 's'
@@ -752,7 +770,7 @@ def shutil_make_zip(output, folder):
             archive.write(file, file.name)
 
 
-def regional_assessment(sources, rows, region, mode, selected, out, progress, check, output, focused=False):
+def regional_assessment(sources, rows, region, mode, selected, out, progress, check, output, focused=False, selected_only=False):
     nationwide_table = region == 'Nationwide' and focused and output == 'table'
     areas = []
     feature_count = 0
@@ -777,7 +795,7 @@ def regional_assessment(sources, rows, region, mode, selected, out, progress, ch
         with tempfile_directory(out) as temp:
             folder = Path(temp)
             result = assessments(sources, row, mode, selected, folder, stage, check, output, intermediate=True, focused=focused,
-                                 archive_bounds=archive_bounds)
+                                 archive_bounds=archive_bounds, selected_only=selected_only)
             feature_count += result['features']
             if result['features'] and not (focused and output == 'table'):
                 frame = pyogrio.read_dataframe(folder / 'assessment.gpkg')
@@ -833,6 +851,8 @@ def regional_assessment(sources, rows, region, mode, selected, out, progress, ch
           'repaired_geometries': sum(i['repaired_geometries'] for i in summaries),
           'slivers_under_1m2': sum(i['slivers_under_1m2'] for i in summaries),
           'area_reconciliation_ha': sum(i['area_reconciliation_ha'] for i in summaries)}
+    if selected_only:
+        qa['selected_crop_only'] = True
     result = {'province': region, 'region': region, 'area': region, 'level': 'Nationwide' if region == 'Nationwide' else 'Region',
               'mode': mode, 'stats': stats, 'qa': qa, 'missing_provinces': missing,
               'bounds': bounds, 'features': feature_count, 'colors': COLORS, 'focused': focused}
