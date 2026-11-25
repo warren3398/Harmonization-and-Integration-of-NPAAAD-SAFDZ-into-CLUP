@@ -10,13 +10,14 @@ from typing import Literal
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 import os
 
 from assessment import CROPS, EXPORTS, assessments, regional_assessment, landuse_crop_options
 from sources import DataError, Sources
+from workbook_totals import WORKBOOK_PATH, read_totals
 
 app = FastAPI(title='Provincial Crop-Based Land Use Assessment Map')
 if os.getenv('PCLAM_WEB_ORIGIN'):
@@ -317,6 +318,26 @@ def file(job_id: str, format: str):
     import re
     slug = re.sub(r'[^a-z0-9]+', '-', result['area'].lower()).strip('-')
     return FileResponse(path, filename=f"pclam-{slug}-{result['mode']}-{job_id[:8]}.{format}")
+
+
+@app.get('/api/nationwide-totals')
+def nationwide_totals():
+    try:
+        data = read_totals(WORKBOOK_PATH, WORKBOOK_PATH.stat().st_mtime_ns)
+    except FileNotFoundError as exc:
+        raise HTTPException(503, 'The Nationwide workbook is not yet available.') from exc
+    except (KeyError, ValueError) as exc:
+        logger.exception('Nationwide workbook failed validation')
+        raise HTTPException(503, 'The Nationwide workbook could not be read.') from exc
+    return JSONResponse(data, headers={'Cache-Control': 'public, max-age=300'})
+
+
+@app.get('/api/nationwide-totals.xlsx')
+def nationwide_workbook():
+    if not WORKBOOK_PATH.is_file():
+        raise HTTPException(404, 'The Nationwide workbook is not yet available.')
+    return FileResponse(WORKBOOK_PATH, filename='PCLAM-Nationwide-Crop-Totals.xlsx',
+                        media_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
 
 
 app.mount('/', StaticFiles(directory=Path(__file__).with_name('web'), html=True), name='web')
